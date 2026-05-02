@@ -1,0 +1,17 @@
+{
+  "name": "Lore",
+  "short_name": "Lore",
+  "description": "Nearby historical stories, mapped and sourced.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f7f0e5",
+  "theme_color": "#f6f0e6",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
