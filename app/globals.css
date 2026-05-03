@@ -256,6 +256,119 @@ a {
   border-color: var(--moss);
 }
 
+.planning-form {
+  display: grid;
+  gap: 10px;
+}
+
+.planning-search {
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 4px 4px 12px;
+  background: rgba(255, 252, 246, 0.86);
+}
+
+.planning-search:focus-within {
+  border-color: rgba(157, 63, 47, 0.42);
+  box-shadow: 0 0 0 3px rgba(157, 63, 47, 0.1);
+}
+
+.planning-search > svg {
+  color: var(--muted);
+}
+
+.planning-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+  background: transparent;
+  font-size: 14px;
+}
+
+.planning-search input::placeholder {
+  color: rgba(116, 109, 99, 0.78);
+}
+
+.planning-submit {
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgba(35, 31, 27, 0.08);
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: #fffaf1;
+  background: var(--brick);
+  cursor: pointer;
+  transition: transform 140ms ease, background 140ms ease, opacity 140ms ease;
+}
+
+.planning-submit:hover {
+  transform: translateY(-1px);
+  background: var(--brick-dark);
+}
+
+.planning-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+  transform: none;
+}
+
+.planning-results {
+  display: grid;
+  gap: 7px;
+}
+
+.planning-result {
+  width: 100%;
+  min-height: 54px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  padding: 9px 11px;
+  color: inherit;
+  background: rgba(255, 252, 246, 0.66);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.planning-result:hover,
+.planning-result.is-selected {
+  transform: translateY(-1px);
+  border-color: rgba(73, 107, 85, 0.35);
+  box-shadow: 0 8px 18px rgba(55, 41, 28, 0.08);
+}
+
+.planning-result.is-selected {
+  background: rgba(73, 107, 85, 0.1);
+}
+
+.planning-result-title {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planning-result-meta {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .section-heading {
   margin: 0;
   color: var(--muted);

@@ -4,6 +4,11 @@ export type LocationPoint = {
   label: string;
 };
 
+export type PlanningLocation = LocationPoint & {
+  id: string;
+  description: string;
+};
+
 export type Spot = {
   id: string;
   title: string;
@@ -34,6 +39,23 @@ type WikipediaPage = {
 type WikipediaResponse = {
   query?: {
     pages?: Record<string, WikipediaPage>;
+  };
+};
+
+type NominatimPlace = {
+  place_id: number;
+  lat: string;
+  lon: string;
+  display_name: string;
+  name?: string;
+  address?: {
+    city?: string;
+    town?: string;
+    village?: string;
+    municipality?: string;
+    county?: string;
+    state?: string;
+    country?: string;
   };
 };
 
@@ -144,10 +166,77 @@ export async function fetchWikipediaSpots(location: LocationPoint, radiusMeters 
     .sort((a, b) => (a.distanceMeters ?? 0) - (b.distanceMeters ?? 0));
 }
 
+export async function searchPlanningLocations(query: string): Promise<PlanningLocation[]> {
+  const trimmedQuery = query.trim();
+
+  if (!trimmedQuery) {
+    return [];
+  }
+
+  const params = new URLSearchParams({
+    q: trimmedQuery,
+    format: "jsonv2",
+    addressdetails: "1",
+    limit: "5",
+    dedupe: "1",
+    "accept-language": "en"
+  });
+
+  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params.toString()}`, {
+    headers: {
+      Accept: "application/json"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Location search returned ${response.status}`);
+  }
+
+  const places = (await response.json()) as NominatimPlace[];
+
+  return places
+    .map((place): PlanningLocation | null => {
+      const lat = Number.parseFloat(place.lat);
+      const lng = Number.parseFloat(place.lon);
+
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        return null;
+      }
+
+      const label = place.name?.trim() || place.display_name.split(",")[0]?.trim() || trimmedQuery;
+
+      return {
+        id: `nominatim:${place.place_id}`,
+        lat,
+        lng,
+        label,
+        description: describePlanningLocation(place, label)
+      };
+    })
+    .filter((place): place is PlanningLocation => Boolean(place));
+}
+
 function cleanSummary(summary?: string) {
   if (!summary) {
     return undefined;
   }
 
   return summary.replace(/\s+/g, " ").trim();
+}
+
+function describePlanningLocation(place: NominatimPlace, label: string) {
+  const address = place.address;
+
+  if (!address) {
+    return place.display_name;
+  }
+
+  const locality = address.city ?? address.town ?? address.village ?? address.municipality ?? address.county;
+  const normalizedLabel = label.toLocaleLowerCase();
+  const locationParts = [locality, address.state, address.country].filter((part): part is string => Boolean(part));
+  const parts = locationParts.filter(
+    (part, index, values) => part.toLocaleLowerCase() !== normalizedLabel && values.indexOf(part) === index
+  );
+
+  return parts.join(", ") || place.display_name;
 }

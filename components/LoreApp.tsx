@@ -10,9 +10,10 @@ import {
   Navigation,
   Radio,
   RefreshCw,
+  Search,
   X
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cacheCellKey,
   DEFAULT_RADIUS_METERS,
@@ -20,6 +21,8 @@ import {
   formatDistance,
   HYDE_PARK_LOCATION,
   LocationPoint,
+  PlanningLocation,
+  searchPlanningLocations,
   shouldRefreshSpots,
   Spot
 } from "@/lib/spots";
@@ -40,6 +43,9 @@ export default function LoreApp() {
   const [walkMode, setWalkMode] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const [planningQuery, setPlanningQuery] = useState("");
+  const [planningResults, setPlanningResults] = useState<PlanningLocation[]>([]);
+  const [searchState, setSearchState] = useState<LoadState>("idle");
 
   const cacheRef = useRef(new Map<string, Spot[]>());
   const watchIdRef = useRef<number | null>(null);
@@ -55,7 +61,7 @@ export default function LoreApp() {
   }, []);
 
   const loadSpots = useCallback(
-    async (location: LocationPoint, options?: { force?: boolean; reason?: "manual" | "walk" | "preset" }) => {
+    async (location: LocationPoint, options?: { force?: boolean; reason?: "manual" | "walk" | "preset" | "planning" }) => {
       const key = cacheCellKey(location);
       const cached = cacheRef.current.get(key);
 
@@ -66,6 +72,7 @@ export default function LoreApp() {
         setSelectedSpotId((current) => current ?? cached[0]?.id ?? null);
         setUpdatedAt(new Date());
         lastFetchLocationRef.current = location;
+        setLoadState("success");
 
         if (options?.reason === "walk") {
           setMessage("Nearby stories refreshed from cache.");
@@ -123,15 +130,65 @@ export default function LoreApp() {
     };
   }, []);
 
-  const stopWalkMode = useCallback(() => {
+  const stopWalkMode = useCallback((options?: { silent?: boolean }) => {
+    const hadActiveWatch = watchIdRef.current !== null;
+
     if (watchIdRef.current !== null) {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
 
     setWalkMode(false);
-    setMessage("Walk mode paused.");
+
+    if (hadActiveWatch && !options?.silent) {
+      setMessage("Walk mode paused.");
+    }
   }, []);
+
+  const selectPlanningLocation = useCallback(
+    (location: PlanningLocation) => {
+      stopWalkMode({ silent: true });
+      setUserLocation(null);
+      setPlanningQuery(location.label);
+      void loadSpots(location, { reason: "planning" });
+    },
+    [loadSpots, stopWalkMode]
+  );
+
+  const searchForPlanningLocation = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+
+      const query = planningQuery.trim();
+
+      if (!query) {
+        setPlanningResults([]);
+        setSearchState("idle");
+        setMessage("Enter a city or place to plan.");
+        return;
+      }
+
+      setSearchState("loading");
+      setMessage(null);
+
+      try {
+        const results = await searchPlanningLocations(query);
+        setPlanningResults(results);
+        setSearchState("success");
+
+        if (results.length === 0) {
+          setMessage("No places matched that search.");
+          return;
+        }
+
+        selectPlanningLocation(results[0]);
+      } catch (error) {
+        setSearchState("error");
+        setMessage(error instanceof Error ? error.message : "Unable to search that place.");
+      }
+    },
+    [planningQuery, selectPlanningLocation]
+  );
 
   const startWalkMode = useCallback(() => {
     if (!("geolocation" in navigator)) {
@@ -181,8 +238,11 @@ export default function LoreApp() {
   }, [loadSpots, stopWalkMode]);
 
   const resetToHydePark = useCallback(() => {
-    stopWalkMode();
+    stopWalkMode({ silent: true });
     setUserLocation(null);
+    setPlanningQuery("");
+    setPlanningResults([]);
+    setSearchState("idle");
     void loadSpots(HYDE_PARK_LOCATION, { reason: "preset" });
   }, [loadSpots, stopWalkMode]);
 
@@ -234,6 +294,54 @@ export default function LoreApp() {
             Refresh
           </button>
         </div>
+
+        <form className="planning-form" onSubmit={searchForPlanningLocation}>
+          <label className="section-heading" htmlFor="planning-search">
+            Plan
+          </label>
+          <div className="planning-search">
+            <Search size={16} aria-hidden="true" />
+            <input
+              id="planning-search"
+              type="search"
+              value={planningQuery}
+              onChange={(event) => {
+                setPlanningQuery(event.target.value);
+
+                if (!event.target.value.trim()) {
+                  setPlanningResults([]);
+                  setSearchState("idle");
+                }
+              }}
+              placeholder="Search city or landmark"
+              autoComplete="off"
+            />
+            <button
+              className="planning-submit"
+              type="submit"
+              disabled={searchState === "loading"}
+              aria-label="Search place"
+            >
+              <Search size={16} />
+            </button>
+          </div>
+
+          {planningResults.length > 0 ? (
+            <div className="planning-results" aria-label="Planning search results">
+              {planningResults.map((location) => (
+                <button
+                  className={`planning-result${activeLocation.label === location.label ? " is-selected" : ""}`}
+                  key={location.id}
+                  type="button"
+                  onClick={() => selectPlanningLocation(location)}
+                >
+                  <span className="planning-result-title">{location.label}</span>
+                  <span className="planning-result-meta">{location.description}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </form>
 
         <section style={{ display: "grid", gap: 12 }}>
           <h2 className="section-heading">Nearby</h2>
