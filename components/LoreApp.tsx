@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import SaveSpotButton from "@/components/SaveSpotButton";
 import {
   BookOpenText,
   ExternalLink,
@@ -16,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cacheCellKey,
   DEFAULT_RADIUS_METERS,
+  distanceMeters,
   fetchWikipediaSpots,
   formatDistance,
   HYDE_PARK_LOCATION,
@@ -23,6 +25,7 @@ import {
   shouldRefreshSpots,
   Spot
 } from "@/lib/spots";
+import { getSavedSpots, saveSpot, SAVED_SPOTS_STORAGE_KEY, unsaveSpot } from "@/lib/saved-spots";
 
 const LoreMap = dynamic(() => import("@/components/LoreMap"), {
   ssr: false,
@@ -40,18 +43,32 @@ export default function LoreApp() {
   const [walkMode, setWalkMode] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const [savedSpots, setSavedSpotsState] = useState<Spot[]>([]);
 
   const cacheRef = useRef(new Map<string, Spot[]>());
   const watchIdRef = useRef<number | null>(null);
   const lastFetchLocationRef = useRef<LocationPoint | null>(null);
 
   const selectedSpot = useMemo(
-    () => spots.find((spot) => spot.id === selectedSpotId) ?? spots[0] ?? null,
-    [selectedSpotId, spots]
+    () => spots.find((spot) => spot.id === selectedSpotId) ?? savedSpots.find((spot) => spot.id === selectedSpotId) ?? spots[0] ?? null,
+    [savedSpots, selectedSpotId, spots]
+  );
+
+  const savedSpotIds = useMemo(() => new Set(savedSpots.map((spot) => spot.id)), [savedSpots]);
+  const selectedSpotDistance = useMemo(
+    () => (selectedSpot ? distanceMeters(activeLocation, selectedSpot) : undefined),
+    [activeLocation, selectedSpot]
   );
 
   const selectSpot = useCallback((spot: Spot) => {
     setSelectedSpotId(spot.id);
+  }, []);
+
+  const toggleSavedSpot = useCallback((spot: Spot, shouldSave: boolean) => {
+    const nextSavedSpots = shouldSave ? saveSpot(spot) : unsaveSpot(spot.id);
+
+    setSavedSpotsState(nextSavedSpots);
+    setMessage(shouldSave ? "Saved spot." : "Removed from saved spots.");
   }, []);
 
   const loadSpots = useCallback(
@@ -105,6 +122,19 @@ export default function LoreApp() {
   useEffect(() => {
     void loadSpots(HYDE_PARK_LOCATION, { reason: "preset" });
   }, [loadSpots]);
+
+  useEffect(() => {
+    setSavedSpotsState(getSavedSpots());
+
+    const syncSavedSpots = (event: StorageEvent) => {
+      if (event.key === SAVED_SPOTS_STORAGE_KEY) {
+        setSavedSpotsState(getSavedSpots());
+      }
+    };
+
+    window.addEventListener("storage", syncSavedSpots);
+    return () => window.removeEventListener("storage", syncSavedSpots);
+  }, []);
 
   useEffect(() => {
     if (!message) {
@@ -190,7 +220,15 @@ export default function LoreApp() {
     void loadSpots(activeLocation, { force: true, reason: "manual" });
   }, [activeLocation, loadSpots]);
 
-  const visibleSpots = spots.slice(0, 18);
+  const visibleSpots = useMemo(() => spots.slice(0, 18), [spots]);
+  const previewSavedSpots = useMemo(() => savedSpots.slice(0, 4), [savedSpots]);
+  const mapSpots = useMemo(() => {
+    if (!selectedSpot || visibleSpots.some((spot) => spot.id === selectedSpot.id)) {
+      return visibleSpots;
+    }
+
+    return [...visibleSpots, selectedSpot];
+  }, [selectedSpot, visibleSpots]);
   const statusText =
     loadState === "loading"
       ? "Finding stories"
@@ -235,6 +273,27 @@ export default function LoreApp() {
           </button>
         </div>
 
+        {previewSavedSpots.length > 0 ? (
+          <section className="saved-section" aria-label="Saved spots">
+            <div className="section-title-row">
+              <h2 className="section-heading">Saved</h2>
+              <span className="saved-count">{savedSpots.length}</span>
+            </div>
+
+            <div className="saved-list">
+              {previewSavedSpots.map((spot) => (
+                <article className={`saved-card${spot.id === selectedSpot?.id ? " is-selected" : ""}`} key={spot.id}>
+                  <button className="saved-card-main" type="button" onClick={() => selectSpot(spot)}>
+                    <h3 className="saved-title">{spot.title}</h3>
+                    <span className="saved-meta">{spot.sourceName}</span>
+                  </button>
+                  <SaveSpotButton spot={spot} saved={savedSpotIds.has(spot.id)} onToggle={toggleSavedSpot} />
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         <section style={{ display: "grid", gap: 12 }}>
           <h2 className="section-heading">Nearby</h2>
 
@@ -243,26 +302,28 @@ export default function LoreApp() {
           ) : visibleSpots.length > 0 ? (
             <div className="spot-list">
               {visibleSpots.map((spot) => (
-                <button
+                <article
                   className={`spot-card${spot.id === selectedSpot?.id ? " is-selected" : ""}`}
                   key={spot.id}
-                  type="button"
-                  onClick={() => selectSpot(spot)}
                 >
-                  <div>
-                    <h3 className="spot-title">{spot.title}</h3>
-                    <div className="spot-meta">
-                      <span>{formatDistance(spot.distanceMeters)}</span>
-                      <span className="spot-source">
-                        <BookOpenText size={13} />
-                        {spot.sourceName}
-                      </span>
+                  <button className="spot-card-main" type="button" onClick={() => selectSpot(spot)}>
+                    <div>
+                      <h3 className="spot-title">{spot.title}</h3>
+                      <div className="spot-meta">
+                        <span>{formatDistance(spot.distanceMeters)}</span>
+                        <span className="spot-source">
+                          <BookOpenText size={13} />
+                          {spot.sourceName}
+                        </span>
+                      </div>
+                      {spot.summary ? <p className="spot-summary">{spot.summary}</p> : null}
                     </div>
-                    {spot.summary ? <p className="spot-summary">{spot.summary}</p> : null}
-                  </div>
 
-                  {spot.imageUrl ? <img className="spot-image" src={spot.imageUrl} alt="" /> : null}
-                </button>
+                    {spot.imageUrl ? <img className="spot-image" src={spot.imageUrl} alt="" /> : null}
+                  </button>
+
+                  <SaveSpotButton spot={spot} saved={savedSpotIds.has(spot.id)} onToggle={toggleSavedSpot} />
+                </article>
               ))}
             </div>
           ) : (
@@ -276,7 +337,7 @@ export default function LoreApp() {
       <section className="map-region" aria-label="Map">
         <LoreMap
           center={activeLocation}
-          spots={visibleSpots}
+          spots={mapSpots}
           selectedSpotId={selectedSpot?.id ?? null}
           onSelectSpot={selectSpot}
           userLocation={userLocation}
@@ -297,7 +358,7 @@ export default function LoreApp() {
             {selectedSpot.imageUrl ? <img className="detail-media" src={selectedSpot.imageUrl} alt="" /> : null}
             <h2 className="detail-title">{selectedSpot.title}</h2>
             <div className="spot-meta">
-              <span>{formatDistance(selectedSpot.distanceMeters)} from {activeLocation.label}</span>
+              <span>{formatDistance(selectedSpotDistance)} from {activeLocation.label}</span>
               <span className="spot-source">
                 <BookOpenText size={13} />
                 {selectedSpot.sourceName}
@@ -308,10 +369,18 @@ export default function LoreApp() {
                 "This place has a sourced location marker, but the summary is not available from Wikipedia yet."}
             </p>
             <div className="detail-actions">
-              <a className="source-link" href={selectedSpot.sourceUrl} target="_blank" rel="noreferrer">
-                Open source
-                <ExternalLink size={15} />
-              </a>
+              <div className="detail-primary-actions">
+                <SaveSpotButton
+                  spot={selectedSpot}
+                  saved={savedSpotIds.has(selectedSpot.id)}
+                  onToggle={toggleSavedSpot}
+                  showLabel
+                />
+                <a className="source-link" href={selectedSpot.sourceUrl} target="_blank" rel="noreferrer">
+                  Open source
+                  <ExternalLink size={15} />
+                </a>
+              </div>
               <button className="icon-button close-button" type="button" onClick={() => setSelectedSpotId(null)} aria-label="Close details">
                 <X size={18} />
               </button>
