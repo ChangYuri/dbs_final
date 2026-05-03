@@ -379,6 +379,86 @@ a {
   font-weight: 800;
 }
 
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.saved-count {
+  min-width: 24px;
+  height: 22px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--muted);
+  background: rgba(44, 38, 31, 0.08);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.saved-section {
+  display: grid;
+  gap: 10px;
+}
+
+.saved-list {
+  display: grid;
+  gap: 8px;
+}
+
+.saved-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: rgba(255, 252, 246, 0.72);
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.saved-card:hover,
+.saved-card.is-selected {
+  transform: translateY(-1px);
+  border-color: rgba(73, 107, 85, 0.34);
+  box-shadow: 0 8px 18px rgba(55, 41, 28, 0.08);
+}
+
+.saved-card.is-selected {
+  background: #fffaf1;
+}
+
+.saved-card-main {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  padding: 3px;
+  cursor: pointer;
+}
+
+.saved-title {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.25;
+  font-weight: 800;
+}
+
+.saved-meta {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+}
+
 .spot-list {
   display: grid;
   gap: 10px;
@@ -390,12 +470,12 @@ a {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 252, 246, 0.82);
-  text-align: left;
+  color: inherit;
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 12px;
-  padding: 13px;
-  cursor: pointer;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding: 10px;
   transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
 }
 
@@ -408,6 +488,20 @@ a {
 
 .spot-card.is-selected {
   background: #fffaf1;
+}
+
+.spot-card-main {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 3px;
+  cursor: pointer;
 }
 
 .spot-title {
@@ -452,6 +546,49 @@ a {
   gap: 5px;
   color: var(--brick-dark);
   font-weight: 700;
+}
+
+.save-spot-button {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0;
+  color: var(--muted);
+  background: rgba(255, 252, 246, 0.88);
+  cursor: pointer;
+  transition: transform 140ms ease, background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.save-spot-button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(73, 107, 85, 0.34);
+  box-shadow: 0 8px 18px rgba(64, 45, 28, 0.08);
+}
+
+.save-spot-button.is-saved {
+  color: #fffaf1;
+  background: var(--moss);
+  border-color: var(--moss);
+}
+
+.save-spot-button.with-label {
+  width: auto;
+  min-width: 92px;
+  height: 40px;
+  padding: 0 12px;
+  color: var(--moss);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.save-spot-button.with-label.is-saved {
+  color: #fffaf1;
 }
 
 .empty-state {
@@ -508,6 +645,13 @@ a {
   justify-content: space-between;
   gap: 10px;
   margin-top: 16px;
+}
+
+.detail-primary-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .source-link {
@@ -623,6 +767,10 @@ a {
     width: 244px;
     min-width: 244px;
     min-height: 116px;
+  }
+
+  .spot-card-main {
+    grid-template-columns: 1fr;
   }
 
   .spot-summary {
