@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Lore",
-  description: "Nearby historical stories, mapped and sourced.",
+  description: "Discover hidden history around you with sourced nearby stories, map markers, and planning search.",
   manifest: "/manifest.webmanifest",
   icons: {
     icon: "/icon.svg",

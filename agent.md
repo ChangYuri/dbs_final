@@ -12,7 +12,7 @@ Avoid promising true background/passive location tracking in v1. A PWA can watch
 
 ## Version Roadmap
 
-### Version 1: Discovery Loop
+### Version 1: Discovery Loop, complete
 
 Goal: prove that real nearby data feels compelling.
 
@@ -30,17 +30,18 @@ Goal: prove that real nearby data feels compelling.
 
 Do not add Clerk, Supabase, Claude, Historypin, HMdb, offline mode, or community features in v1.
 
-### Version 2: Planning Mode and Better Data
+### Version 2: Planning Mode and Better Coverage
 
-Goal: make Lore useful before arriving somewhere.
+Goal: make Lore useful before arriving somewhere and make the data feel richer in more places.
 
-- Add city/place search.
-- Geocode a searched city into coordinates.
-- Reuse the same nearby spot pipeline for planning mode.
+- Make city/place search the first-class entry point for planning.
+- Geocode a searched city into coordinates and reuse the same nearby spot pipeline.
 - Add Wikidata as a second source.
 - Deduplicate spots from multiple providers.
 - Improve ranking by distance, source quality, and title relevance.
-- Add simple local bookmarks.
+- Show where a spot came from when multiple sources agree, and prefer the stronger record.
+- Upgrade saved spots into a browsable planning list.
+- Add recent searches or quick-switch locations so users can move between places faster.
 
 ### Version 3: Persistence and Personalization
 
@@ -61,6 +62,18 @@ Goal: handle sparse areas without pretending generated content is sourced fact.
 - Include confidence/source indicators.
 - Use AI to summarize sourced pages first, then use fallback only when structured data is thin.
 - Consider Historypin and HMdb only after checking API access, licensing, and allowed use.
+
+## Current Scope
+
+Focus next on Version 2.
+
+End-of-week demo:
+
+1. Open Lore.
+2. Search for a city or place by name.
+3. Jump to that location and see nearby historical spots.
+4. Compare results from more than one source when available.
+5. Save spots into a more useful planning view.
 
 ## Week 1 Scope
 
@@ -101,11 +114,8 @@ type Spot = {
 
 ## Build Priority
 
-1. Scaffold the app.
-2. Render the map.
-3. Fetch Wikipedia nearby results for fixed Hyde Park coordinates.
-4. Normalize results into `Spot`.
-5. Render markers and nearby list.
-6. Add detail drawer with source link.
-7. Add browser geolocation.
-8. Polish the mobile interaction enough for a clear demo.
+1. Expand planning mode into the main discovery path.
+2. Add Wikidata ingestion and spot deduping.
+3. Improve ranking and source confidence handling.
+4. Turn saved spots into a real planning surface.
+5. Polish transitions, empty states, and the mobile interaction around searching and switching locations.

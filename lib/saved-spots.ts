@@ -24,12 +24,22 @@ function isSavedSpot(value: unknown): value is SavedSpot {
     typeof candidate.title === "string" &&
     typeof candidate.lat === "number" &&
     typeof candidate.lng === "number" &&
-    candidate.sourceName === "Wikipedia" &&
+    typeof candidate.sourceName === "string" &&
     typeof candidate.sourceUrl === "string"
   );
 }
 
 function normalizeSpot(spot: Spot): SavedSpot {
+  const sources = spot.sources?.length
+    ? spot.sources
+    : [
+        {
+          name: spot.sourceName,
+          url: spot.sourceUrl,
+          quality: spot.sourceName === "Wikipedia" ? 4 : 3
+        }
+      ];
+
   return {
     id: spot.id,
     title: spot.title,
@@ -39,7 +49,15 @@ function normalizeSpot(spot: Spot): SavedSpot {
     summary: spot.summary,
     sourceName: spot.sourceName,
     sourceUrl: spot.sourceUrl,
-    imageUrl: spot.imageUrl
+    imageUrl: spot.imageUrl,
+    sources,
+    sourceLabel: spot.sourceLabel ?? sources.map((source) => source.name).join(" + "),
+    matchCount: spot.matchCount ?? sources.length,
+    relevanceScore: spot.relevanceScore ?? 0,
+    theme: spot.theme ?? "landmark",
+    signals: spot.signals ?? [],
+    whyThisMatters: spot.whyThisMatters ?? "",
+    confidence: spot.confidence ?? "low"
   };
 }
 
@@ -61,7 +79,7 @@ export function getSavedSpots(): SavedSpot[] {
       return [];
     }
 
-    return parsed.filter(isSavedSpot);
+    return parsed.filter(isSavedSpot).map((spot) => normalizeSpot(spot));
   } catch {
     return [];
   }
