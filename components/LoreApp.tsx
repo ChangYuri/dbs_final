@@ -73,7 +73,7 @@ export default function LoreApp() {
   const lastFetchLocationRef = useRef<LocationPoint | null>(null);
 
   const selectedSpot = useMemo(
-    () => spots.find((spot) => spot.id === selectedSpotId) ?? savedSpots.find((spot) => spot.id === selectedSpotId) ?? spots[0] ?? null,
+    () => spots.find((spot) => spot.id === selectedSpotId) ?? savedSpots.find((spot) => spot.id === selectedSpotId) ?? null,
     [savedSpots, selectedSpotId, spots]
   );
 
@@ -378,12 +378,12 @@ export default function LoreApp() {
   }, [activeTheme, savedSpots, showSavedOnly]);
 
   const mapSpots = useMemo(() => {
-    if (!selectedSpot || visibleSpots.some((spot) => spot.id === selectedSpot.id)) {
-      return visibleSpots;
+    if (!selectedSpot || filteredSpots.some((spot) => spot.id === selectedSpot.id)) {
+      return filteredSpots;
     }
 
-    return [...visibleSpots, selectedSpot];
-  }, [selectedSpot, visibleSpots]);
+    return [...filteredSpots, selectedSpot];
+  }, [filteredSpots, selectedSpot]);
 
   const discoveryCounts = useMemo(() => {
     return spots.reduce<Record<ThemeFilter, number>>(
@@ -492,9 +492,15 @@ export default function LoreApp() {
         </section>
 
         <div className="action-grid">
-          <button className="action-button primary" type="button" onClick={resetToHydePark}>
+          <button
+            className="action-button primary"
+            type="button"
+            onClick={resetToHydePark}
+            title="Return to the Hyde Park demo location"
+            aria-label="Reset to the Hyde Park demo location"
+          >
             <MapPin size={17} />
-            Hyde Park
+            Reset
           </button>
           <button className={`action-button${walkMode ? " live" : ""}`} type="button" onClick={startWalkMode}>
             {walkMode ? <Radio size={17} /> : <LocateFixed size={17} />}
@@ -522,6 +528,67 @@ export default function LoreApp() {
               <span className="discovery-chip-count">{discoveryCounts[theme.value]}</span>
             </button>
           ))}
+        </section>
+
+        <section className="spot-section">
+          <div className="section-title-row">
+            <h2 className="section-heading">{showSavedOnly ? "Saved history" : "Nearby history"}</h2>
+            {!showSavedOnly && spots.length > 0 ? (
+              <span className="source-count">
+                <Layers3 size={13} />
+                {spots.filter((spot) => spot.matchCount > 1).length} multi-source
+              </span>
+            ) : null}
+          </div>
+
+          <p className="section-note">
+            {showSavedOnly
+              ? "Your saved places, filtered as a history collection."
+              : "The app favors locations with concrete historical clues, not just famous attractions."}
+          </p>
+
+          {loadState === "loading" && spots.length === 0 ? (
+            <div className="empty-state">Loading nearby sourced places.</div>
+          ) : visibleSpots.length > 0 ? (
+            <div className="spot-list">
+              {visibleSpots.map((spot) => (
+                <article className={`spot-card${spot.id === selectedSpot?.id ? " is-selected" : ""}`} key={spot.id}>
+                  <button className="spot-card-main" type="button" onClick={() => selectSpot(spot)}>
+                    <div className="spot-copy">
+                      <div className="spot-headline">
+                        <h3 className="spot-title">{spot.title}</h3>
+                        <span className={`confidence-badge confidence-${spot.confidence}`}>{spot.confidence}</span>
+                      </div>
+                      <div className="spot-meta">
+                        <span>{formatDistance(spot.distanceMeters)}</span>
+                        <span className="spot-source">
+                          <BookOpenText size={13} />
+                          {spot.sourceLabel}
+                        </span>
+                      </div>
+                      <div className="spot-badges">
+                        <span className="spot-badge is-theme">{themeLabel(spot.theme)}</span>
+                        {spot.signals.slice(0, 3).map((signal) => (
+                          <span className="spot-badge" key={signal}>
+                            {signal}
+                          </span>
+                        ))}
+                      </div>
+                      {spot.summary ? <p className="spot-summary">{spot.summary}</p> : null}
+                    </div>
+
+                    {spot.imageUrl ? <img className="spot-image" src={spot.imageUrl} alt="" /> : null}
+                  </button>
+
+                  <SaveSpotButton spot={spot} saved={savedSpotIds.has(spot.id)} onToggle={toggleSavedSpot} />
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state">
+              No history matches this filter yet. Try a different topic, turn off saved-only mode, or hit Surprise me.
+            </div>
+          )}
         </section>
 
         <form className="planning-form" onSubmit={searchForPlanningLocation}>
@@ -611,67 +678,6 @@ export default function LoreApp() {
             </div>
           </section>
         ) : null}
-
-        <section className="spot-section">
-          <div className="section-title-row">
-            <h2 className="section-heading">{showSavedOnly ? "Saved history" : "Nearby history"}</h2>
-            {!showSavedOnly && spots.length > 0 ? (
-              <span className="source-count">
-                <Layers3 size={13} />
-                {spots.filter((spot) => spot.matchCount > 1).length} multi-source
-              </span>
-            ) : null}
-          </div>
-
-          <p className="section-note">
-            {showSavedOnly
-              ? "Your saved places, filtered as a history collection."
-              : "The app favors locations with concrete historical clues, not just famous attractions."}
-          </p>
-
-          {loadState === "loading" && spots.length === 0 ? (
-            <div className="empty-state">Loading nearby sourced places.</div>
-          ) : visibleSpots.length > 0 ? (
-            <div className="spot-list">
-              {visibleSpots.map((spot) => (
-                <article className={`spot-card${spot.id === selectedSpot?.id ? " is-selected" : ""}`} key={spot.id}>
-                  <button className="spot-card-main" type="button" onClick={() => selectSpot(spot)}>
-                    <div className="spot-copy">
-                      <div className="spot-headline">
-                        <h3 className="spot-title">{spot.title}</h3>
-                        <span className={`confidence-badge confidence-${spot.confidence}`}>{spot.confidence}</span>
-                      </div>
-                      <div className="spot-meta">
-                        <span>{formatDistance(spot.distanceMeters)}</span>
-                        <span className="spot-source">
-                          <BookOpenText size={13} />
-                          {spot.sourceLabel}
-                        </span>
-                      </div>
-                      <div className="spot-badges">
-                        <span className="spot-badge is-theme">{themeLabel(spot.theme)}</span>
-                        {spot.signals.slice(0, 3).map((signal) => (
-                          <span className="spot-badge" key={signal}>
-                            {signal}
-                          </span>
-                        ))}
-                      </div>
-                      {spot.summary ? <p className="spot-summary">{spot.summary}</p> : null}
-                    </div>
-
-                    {spot.imageUrl ? <img className="spot-image" src={spot.imageUrl} alt="" /> : null}
-                  </button>
-
-                  <SaveSpotButton spot={spot} saved={savedSpotIds.has(spot.id)} onToggle={toggleSavedSpot} />
-                </article>
-              ))}
-            </div>
-          ) : (
-            <div className="empty-state">
-              No history matches this filter yet. Try a different topic, turn off saved-only mode, or hit Surprise me.
-            </div>
-          )}
-        </section>
       </aside>
 
       <section className="map-region" aria-label="Map">
