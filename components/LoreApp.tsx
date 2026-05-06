@@ -7,9 +7,8 @@ import {
   Clock3,
   ExternalLink,
   Landmark,
-  Layers3,
-  LocateFixed,
   MapPin,
+  LocateFixed,
   Navigation,
   Radio,
   RefreshCw,
@@ -24,17 +23,16 @@ import {
   distanceMeters,
   fetchNearbySpots,
   formatDistance,
+  hydrateSpotFromWikipediaTitle,
   HYDE_PARK_LOCATION,
   LocationPoint,
   PlanningLocation,
   searchPlanningLocations,
   shouldRefreshSpots,
   Spot,
-  SpotTheme,
-  themeChoices,
   themeLabel
 } from "@/lib/spots";
-import { getSavedSpots, saveSpot, SAVED_SPOTS_STORAGE_KEY, unsaveSpot } from "@/lib/saved-spots";
+import { getSavedSpots, saveSpot, SAVED_SPOTS_STORAGE_KEY, setSavedSpots, unsaveSpot } from "@/lib/saved-spots";
 
 const LoreMap = dynamic(() => import("@/components/LoreMap"), {
   ssr: false,
@@ -42,18 +40,15 @@ const LoreMap = dynamic(() => import("@/components/LoreMap"), {
 });
 
 type LoadState = "idle" | "loading" | "success" | "error";
-type ThemeFilter = SpotTheme | "all";
+type AppMode = "travel" | "discover";
 
 const RECENT_PLACES_STORAGE_KEY = "lore:recent-planning-locations";
 const MAX_RECENT_PLACES = 5;
-const THEME_FILTERS: Array<{ value: ThemeFilter; label: string }> = [
-  { value: "all", label: "All history" },
-  ...themeChoices()
-];
 
 export default function LoreApp() {
   const [activeLocation, setActiveLocation] = useState<LocationPoint>(HYDE_PARK_LOCATION);
   const [userLocation, setUserLocation] = useState<LocationPoint | null>(null);
+  const [mode, setMode] = useState<AppMode>("travel");
   const [spots, setSpots] = useState<Spot[]>([]);
   const [selectedSpotId, setSelectedSpotId] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
@@ -65,8 +60,9 @@ export default function LoreApp() {
   const [searchState, setSearchState] = useState<LoadState>("idle");
   const [savedSpots, setSavedSpotsState] = useState<Spot[]>([]);
   const [recentLocations, setRecentLocations] = useState<PlanningLocation[]>([]);
-  const [showSavedOnly, setShowSavedOnly] = useState(false);
-  const [activeTheme, setActiveTheme] = useState<ThemeFilter>("all");
+  const [savedDrawerOpen, setSavedDrawerOpen] = useState(false);
+  const [detailExpanded, setDetailExpanded] = useState(false);
+  const [pinnedLocation, setPinnedLocation] = useState<LocationPoint | null>(null);
 
   const cacheRef = useRef(new Map<string, Spot[]>());
   const watchIdRef = useRef<number | null>(null);
@@ -83,6 +79,14 @@ export default function LoreApp() {
     [activeLocation, selectedSpot]
   );
   const selectedSpotSources = selectedSpot?.sources ?? [];
+  const selectedSpotIntro = selectedSpot ? selectedSpot.narrative.slice(0, 5).join(" ") : "";
+  const selectedSpotMoreNarrative = selectedSpot ? selectedSpot.narrative.slice(5) : [];
+  const hasMoreDetail = Boolean(
+    selectedSpot && (selectedSpot.narrative.length > 1 || selectedSpot.facts.length > 0 || selectedSpot.whyThisMatters)
+  );
+  const travelLocation = userLocation ?? HYDE_PARK_LOCATION;
+  const savedSpotCount = savedSpots.length;
+  const mapUserLocation = mode === "discover" ? pinnedLocation : userLocation;
 
   const selectSpot = useCallback((spot: Spot) => {
     setSelectedSpotId(spot.id);
@@ -162,6 +166,13 @@ export default function LoreApp() {
     []
   );
 
+  const loadTravelSpots = useCallback(
+    (options?: { force?: boolean; reason?: "manual" | "walk" | "preset" | "planning" }) => {
+      void loadSpots(travelLocation, options ?? { reason: userLocation ? "walk" : "preset" });
+    },
+    [loadSpots, travelLocation, userLocation]
+  );
+
   useEffect(() => {
     void loadSpots(HYDE_PARK_LOCATION, { reason: "preset" });
   }, [loadSpots]);
@@ -223,6 +234,43 @@ export default function LoreApp() {
   }, [message]);
 
   useEffect(() => {
+    setDetailExpanded(false);
+  }, [selectedSpotId]);
+
+  useEffect(() => {
+    if (!selectedSpot || selectedSpot.sourceName === "Wikipedia") {
+      return;
+    }
+
+    let cancelled = false;
+
+    void hydrateSpotFromWikipediaTitle(selectedSpot)
+      .then((hydratedSpot) => {
+        if (cancelled || hydratedSpot.sourceName !== "Wikipedia") {
+          return;
+        }
+
+        setSpots((currentSpots) =>
+          currentSpots.map((spot) => (spot.id === hydratedSpot.id ? hydratedSpot : spot))
+        );
+        setSavedSpotsState((currentSavedSpots) => {
+          if (!currentSavedSpots.some((spot) => spot.id === hydratedSpot.id)) {
+            return currentSavedSpots;
+          }
+
+          return setSavedSpots(currentSavedSpots.map((spot) => (spot.id === hydratedSpot.id ? hydratedSpot : spot)));
+        });
+      })
+      .catch(() => {
+        // A missed Wikipedia hydration should not block the sourced Wikidata record.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSpot]);
+
+  useEffect(() => {
     return () => {
       if (watchIdRef.current !== null) {
         navigator.geolocation.clearWatch(watchIdRef.current);
@@ -245,21 +293,58 @@ export default function LoreApp() {
     }
   }, []);
 
-  const selectPlanningLocation = useCallback(
-    (location: PlanningLocation) => {
+  const pinExploreLocation = useCallback(
+    (location: LocationPoint, options?: { message?: string }) => {
       stopWalkMode({ silent: true });
+      setMode("discover");
+      setPinnedLocation(location);
       setUserLocation(null);
-      setShowSavedOnly(false);
-      setPlanningQuery(location.label);
-      rememberPlanningLocation(location);
+      setPlanningResults([]);
+      setSearchState("idle");
+      setSelectedSpotId(null);
+      setMessage(options?.message ?? `Pinned ${location.label}.`);
       void loadSpots(location, { reason: "planning" });
     },
-    [loadSpots, rememberPlanningLocation, stopWalkMode]
+    [loadSpots, stopWalkMode]
+  );
+
+  const selectPlanningLocation = useCallback(
+    (location: PlanningLocation) => {
+      setPlanningQuery(location.label);
+      rememberPlanningLocation(location);
+      pinExploreLocation(location, { message: `Exploring ${location.label}.` });
+    },
+    [pinExploreLocation, rememberPlanningLocation]
+  );
+
+  const switchMode = useCallback(
+    (nextMode: AppMode) => {
+      if (nextMode === mode) {
+        return;
+      }
+
+      stopWalkMode({ silent: true });
+      setMode(nextMode);
+      setPinnedLocation(null);
+      setUserLocation(null);
+
+      if (nextMode === "discover") {
+        setMessage("Discover mode: search for a city or place.");
+        return;
+      }
+
+      setPlanningResults([]);
+      setSearchState("idle");
+      setPlanningQuery("");
+      loadTravelSpots();
+    },
+    [loadTravelSpots, mode, stopWalkMode]
   );
 
   const searchForPlanningLocation = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
+      setMode("discover");
 
       const query = planningQuery.trim();
 
@@ -303,6 +388,8 @@ export default function LoreApp() {
       return;
     }
 
+    setMode("travel");
+    setPinnedLocation(null);
     setWalkMode(true);
     setMessage("Waiting for location permission.");
 
@@ -341,9 +428,9 @@ export default function LoreApp() {
 
   const resetToHydePark = useCallback(() => {
     stopWalkMode({ silent: true });
+    setMode("travel");
     setUserLocation(null);
-    setShowSavedOnly(false);
-    setActiveTheme("all");
+    setPinnedLocation(null);
     setPlanningQuery("");
     setPlanningResults([]);
     setSearchState("idle");
@@ -354,78 +441,40 @@ export default function LoreApp() {
     void loadSpots(activeLocation, { force: true, reason: "manual" });
   }, [activeLocation, loadSpots]);
 
-  const currentPool = useMemo(() => {
-    if (showSavedOnly) {
-      return savedSpots.map((spot) => ({
-        ...spot,
-        distanceMeters: distanceMeters(activeLocation, spot)
-      }));
-    }
-
-    return spots;
-  }, [activeLocation, savedSpots, showSavedOnly, spots]);
-
-  const filteredSpots = useMemo(() => {
-    const themedPool = activeTheme === "all" ? currentPool : currentPool.filter((spot) => spot.theme === activeTheme);
-    return themedPool;
-  }, [activeTheme, currentPool]);
-
-  const visibleSpots = useMemo(() => filteredSpots.slice(0, showSavedOnly ? 24 : 18), [filteredSpots, showSavedOnly]);
-
-  const previewSavedSpots = useMemo(() => {
-    const themedSaved = activeTheme === "all" ? savedSpots : savedSpots.filter((spot) => spot.theme === activeTheme);
-    return showSavedOnly ? themedSaved : themedSaved.slice(0, 4);
-  }, [activeTheme, savedSpots, showSavedOnly]);
-
-  const mapSpots = useMemo(() => {
-    if (!selectedSpot || filteredSpots.some((spot) => spot.id === selectedSpot.id)) {
-      return filteredSpots;
-    }
-
-    return [...filteredSpots, selectedSpot];
-  }, [filteredSpots, selectedSpot]);
-
-  const discoveryCounts = useMemo(() => {
-    return spots.reduce<Record<ThemeFilter, number>>(
-      (counts, spot) => {
-        counts.all += 1;
-        counts[spot.theme] += 1;
-        return counts;
-      },
-      {
-        all: 0,
-        firsts: 0,
-        education: 0,
-        "civil-rights": 0,
-        events: 0,
-        people: 0,
-        architecture: 0,
-        transport: 0,
-        culture: 0,
-        landmark: 0
-      }
-    );
-  }, [spots]);
-
-  const themeSpotCount = activeTheme === "all" ? filteredSpots.length : discoveryCounts[activeTheme];
-
-  const surpriseSpot = useMemo(() => {
-    if (filteredSpots.length === 0) {
-      return null;
-    }
-
-    return filteredSpots.find((spot) => spot.id !== selectedSpot?.id) ?? filteredSpots[0] ?? null;
-  }, [filteredSpots, selectedSpot?.id]);
-
-  useEffect(() => {
-    if (!selectedSpotId || activeTheme === "all") {
+  const pinCurrentView = useCallback(() => {
+    if (mode !== "discover") {
       return;
     }
 
-    if (filteredSpots.length > 0 && !filteredSpots.some((spot) => spot.id === selectedSpotId)) {
-      setSelectedSpotId(filteredSpots[0].id);
+    pinExploreLocation(activeLocation, { message: `Pinned ${activeLocation.label}.` });
+  }, [activeLocation, mode, pinExploreLocation]);
+
+  const handleDiscoverMapClick = useCallback(
+    (location: LocationPoint) => {
+      if (mode !== "discover") {
+        return;
+      }
+
+      pinExploreLocation(location);
+    },
+    [mode, pinExploreLocation]
+  );
+
+  const mapSpots = useMemo(() => {
+    if (!selectedSpot || spots.some((spot) => spot.id === selectedSpot.id)) {
+      return spots;
     }
-  }, [activeTheme, filteredSpots, selectedSpotId]);
+
+    return [...spots, selectedSpot];
+  }, [selectedSpot, spots]);
+
+  const surpriseSpot = useMemo(() => {
+    if (spots.length === 0) {
+      return null;
+    }
+
+    return spots.find((spot) => spot.id !== selectedSpot?.id) ?? spots[0] ?? null;
+  }, [selectedSpot?.id, spots]);
 
   const handleSurprise = useCallback(() => {
     if (!surpriseSpot) {
@@ -440,15 +489,26 @@ export default function LoreApp() {
   const statusText =
     loadState === "loading"
       ? "Finding stories"
-      : walkMode
-        ? "Live history"
-        : updatedAt
-          ? `Updated ${updatedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
-          : "Ready";
+      : mode === "discover"
+        ? searchState !== "idle" || planningResults.length > 0
+          ? updatedAt
+            ? `Planned ${updatedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+            : "Discover mode"
+          : "Discover mode"
+        : walkMode
+          ? "Live history"
+          : updatedAt
+            ? `Updated ${updatedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+          : "Travel mode";
+  const sectionNote =
+    mode === "discover"
+      ? "Search a city or click the map to drop a pin, then explore what is nearby."
+      : "Live location stays foreground-only while you walk.";
+  const sidebarPrompt = mode === "discover" ? "Plan ahead" : "Walk mode";
 
   return (
     <main className="app-shell">
-      <aside className="side-panel" aria-label="Nearby stories">
+      <aside className="side-panel" aria-label="Lore controls">
         <header className="brand-row">
           <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
             <div className="brand-mark" aria-hidden="true">
@@ -466,207 +526,131 @@ export default function LoreApp() {
           </div>
         </header>
 
-        <section className="hero-card" aria-label="Discovery summary">
-          <div className="hero-copy">
-            <p className="hero-kicker">Nearby history, not just landmarks</p>
-            <h2 className="hero-title">{activeLocation.label}</h2>
-            <p className="hero-deck">
-              Find the firsts, institutions, routes, and small places with a bigger story than their appearance suggests.
-            </p>
-          </div>
+        <div className="mode-switch" role="tablist" aria-label="Lore mode">
+          <button
+            className={`mode-switch-button${mode === "travel" ? " is-active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={mode === "travel"}
+            onClick={() => switchMode("travel")}
+          >
+            Travel
+          </button>
+          <button
+            className={`mode-switch-button${mode === "discover" ? " is-active" : ""}`}
+            type="button"
+            role="tab"
+            aria-selected={mode === "discover"}
+            onClick={() => switchMode("discover")}
+          >
+            Discover
+          </button>
+        </div>
 
-          <div className="hero-stats">
-            <div className="stat-card">
-              <span className="stat-value">{spots.length}</span>
-              <span className="stat-label">stories</span>
-            </div>
-            <div className="stat-card">
-              <span className="stat-value">{savedSpots.length}</span>
-              <span className="stat-label">saved</span>
-            </div>
-            <div className="stat-card">
-              <span className="stat-value">{themeSpotCount}</span>
-              <span className="stat-label">{activeTheme === "all" ? "visible" : themeLabel(activeTheme)}</span>
-            </div>
-          </div>
+        <section className="control-summary" aria-label="Mode summary">
+          <p className="control-summary-kicker">{sidebarPrompt}</p>
+          <h2 className="control-summary-title">{activeLocation.label}</h2>
+          <p className="control-summary-copy">{sectionNote}</p>
         </section>
 
-        <div className="action-grid">
-          <button
-            className="action-button primary"
-            type="button"
-            onClick={resetToHydePark}
-            title="Return to the Hyde Park demo location"
-            aria-label="Reset to the Hyde Park demo location"
-          >
-            <MapPin size={17} />
-            Reset
-          </button>
-          <button className={`action-button${walkMode ? " live" : ""}`} type="button" onClick={startWalkMode}>
-            {walkMode ? <Radio size={17} /> : <LocateFixed size={17} />}
-            {walkMode ? "Live" : "Near me"}
-          </button>
+        <div className="quick-actions" aria-label="Quick actions">
+          {mode === "discover" ? (
+            <button className="action-button primary" type="button" onClick={pinCurrentView}>
+              <MapPin size={17} />
+              Pin here
+            </button>
+          ) : (
+            <button className={`action-button${walkMode ? " live" : ""}`} type="button" onClick={startWalkMode}>
+              {walkMode ? <Radio size={17} /> : <LocateFixed size={17} />}
+              {walkMode ? "Live" : "Near me"}
+            </button>
+          )}
           <button className="action-button" type="button" onClick={handleSurprise} disabled={!surpriseSpot}>
             <Sparkles size={17} />
             Surprise me
           </button>
-          <button className="action-button" type="button" onClick={refresh} disabled={loadState === "loading"}>
-            <RefreshCw size={17} />
-            Refresh
-          </button>
         </div>
 
-        <section className="discovery-strip" aria-label="History filters">
-          {THEME_FILTERS.map((theme) => (
-            <button
-              key={theme.value}
-              type="button"
-              className={`discovery-chip${activeTheme === theme.value ? " is-active" : ""}`}
-              onClick={() => setActiveTheme(theme.value)}
-            >
-              <span>{theme.label}</span>
-              <span className="discovery-chip-count">{discoveryCounts[theme.value]}</span>
-            </button>
-          ))}
-        </section>
+        {mode === "discover" ? (
+          <form className="planning-form" onSubmit={searchForPlanningLocation}>
+            <label className="section-heading" htmlFor="planning-search">
+              Plan ahead
+            </label>
+            <div className="planning-search">
+              <Search size={16} aria-hidden="true" />
+              <input
+                id="planning-search"
+                type="search"
+                value={planningQuery}
+                onChange={(event) => {
+                  setPlanningQuery(event.target.value);
 
-        <section className="spot-section">
-          <div className="section-title-row">
-            <h2 className="section-heading">{showSavedOnly ? "Saved history" : "Nearby history"}</h2>
-            {!showSavedOnly && spots.length > 0 ? (
-              <span className="source-count">
-                <Layers3 size={13} />
-                {spots.filter((spot) => spot.matchCount > 1).length} multi-source
-              </span>
-            ) : null}
-          </div>
-
-          <p className="section-note">
-            {showSavedOnly
-              ? "Your saved places, filtered as a history collection."
-              : "The app favors locations with concrete historical clues, not just famous attractions."}
-          </p>
-
-          {loadState === "loading" && spots.length === 0 ? (
-            <div className="empty-state">Loading nearby sourced places.</div>
-          ) : visibleSpots.length > 0 ? (
-            <div className="spot-list">
-              {visibleSpots.map((spot) => (
-                <article className={`spot-card${spot.id === selectedSpot?.id ? " is-selected" : ""}`} key={spot.id}>
-                  <button className="spot-card-main" type="button" onClick={() => selectSpot(spot)}>
-                    <div className="spot-copy">
-                      <div className="spot-headline">
-                        <h3 className="spot-title">{spot.title}</h3>
-                        <span className={`confidence-badge confidence-${spot.confidence}`}>{spot.confidence}</span>
-                      </div>
-                      <div className="spot-meta">
-                        <span>{formatDistance(spot.distanceMeters)}</span>
-                        <span className="spot-source">
-                          <BookOpenText size={13} />
-                          {spot.sourceLabel}
-                        </span>
-                      </div>
-                      <div className="spot-badges">
-                        <span className="spot-badge is-theme">{themeLabel(spot.theme)}</span>
-                        {spot.signals.slice(0, 3).map((signal) => (
-                          <span className="spot-badge" key={signal}>
-                            {signal}
-                          </span>
-                        ))}
-                      </div>
-                      {spot.summary ? <p className="spot-summary">{spot.summary}</p> : null}
-                    </div>
-
-                    {spot.imageUrl ? <img className="spot-image" src={spot.imageUrl} alt="" /> : null}
-                  </button>
-
-                  <SaveSpotButton spot={spot} saved={savedSpotIds.has(spot.id)} onToggle={toggleSavedSpot} />
-                </article>
-              ))}
+                  if (!event.target.value.trim()) {
+                    setPlanningResults([]);
+                    setSearchState("idle");
+                  }
+                }}
+                placeholder="Search city or landmark"
+                autoComplete="off"
+              />
+              <button className="planning-submit" type="submit" disabled={searchState === "loading"} aria-label="Search place">
+                <Search size={16} />
+              </button>
             </div>
-          ) : (
-            <div className="empty-state">
-              No history matches this filter yet. Try a different topic, turn off saved-only mode, or hit Surprise me.
-            </div>
-          )}
-        </section>
 
-        <form className="planning-form" onSubmit={searchForPlanningLocation}>
-          <label className="section-heading" htmlFor="planning-search">
-            Plan ahead
-          </label>
-          <div className="planning-search">
-            <Search size={16} aria-hidden="true" />
-            <input
-              id="planning-search"
-              type="search"
-              value={planningQuery}
-              onChange={(event) => {
-                setPlanningQuery(event.target.value);
-
-                if (!event.target.value.trim()) {
-                  setPlanningResults([]);
-                  setSearchState("idle");
-                }
-              }}
-              placeholder="Search city or landmark"
-              autoComplete="off"
-            />
-            <button className="planning-submit" type="submit" disabled={searchState === "loading"} aria-label="Search place">
-              <Search size={16} />
-            </button>
-          </div>
-
-          {planningResults.length > 0 ? (
-            <div className="planning-results" aria-label="Planning search results">
-              {planningResults.map((location) => (
-                <button
-                  className={`planning-result${activeLocation.label === location.label ? " is-selected" : ""}`}
-                  key={location.id}
-                  type="button"
-                  onClick={() => selectPlanningLocation(location)}
-                >
-                  <span className="planning-result-title">{location.label}</span>
-                  <span className="planning-result-meta">{location.description}</span>
-                </button>
-              ))}
-            </div>
-          ) : null}
-
-          {recentLocations.length > 0 ? (
-            <div className="recent-locations" aria-label="Recent planning locations">
-              <div className="mini-heading">
-                <Clock3 size={13} />
-                Recent
-              </div>
-              <div className="recent-location-list">
-                {recentLocations.map((location) => (
+            {planningResults.length > 0 ? (
+              <div className="planning-results" aria-label="Planning search results">
+                {planningResults.map((location) => (
                   <button
-                    className={`recent-location${activeLocation.label === location.label ? " is-selected" : ""}`}
+                    className={`planning-result${activeLocation.label === location.label ? " is-selected" : ""}`}
                     key={location.id}
                     type="button"
                     onClick={() => selectPlanningLocation(location)}
                   >
-                    {location.label}
+                    <span className="planning-result-title">{location.label}</span>
+                    <span className="planning-result-meta">{location.description}</span>
                   </button>
                 ))}
               </div>
-            </div>
-          ) : null}
-        </form>
+            ) : null}
 
-        {previewSavedSpots.length > 0 ? (
-          <section className="saved-section" aria-label="Saved spots">
-            <div className="section-title-row">
-              <h2 className="section-heading">Saved</h2>
-              <button className="saved-toggle" type="button" onClick={() => setShowSavedOnly((current) => !current)}>
-                <Layers3 size={14} />
-                {showSavedOnly ? "Nearby" : savedSpots.length}
-              </button>
-            </div>
+            {recentLocations.length > 0 ? (
+              <div className="recent-locations" aria-label="Recent planning locations">
+                <div className="mini-heading">
+                  <Clock3 size={13} />
+                  Recent
+                </div>
+                <div className="recent-location-list">
+                  {recentLocations.map((location) => (
+                    <button
+                      className={`recent-location${activeLocation.label === location.label ? " is-selected" : ""}`}
+                      key={location.id}
+                      type="button"
+                      onClick={() => selectPlanningLocation(location)}
+                    >
+                      {location.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </form>
+        ) : (
+          <section className="mode-callout" aria-label="Planning mode hint">
+            <p className="mode-callout-title">Discover owns planning.</p>
+            <p className="mode-callout-copy">Switch to Discover to search for a city or place before exploring it.</p>
+          </section>
+        )}
 
-            <div className="saved-list">
-              {previewSavedSpots.map((spot) => (
+        <details className="saved-drawer" open={savedDrawerOpen} onToggle={(event) => setSavedDrawerOpen(event.currentTarget.open)}>
+          <summary className="saved-drawer-summary">
+            <span>Saved spots</span>
+            <span className="saved-drawer-count">{savedSpotCount}</span>
+          </summary>
+
+          {savedSpots.length > 0 ? (
+            <div className="saved-drawer-list">
+              {savedSpots.map((spot) => (
                 <article className={`saved-card${spot.id === selectedSpot?.id ? " is-selected" : ""}`} key={spot.id}>
                   <button className="saved-card-main" type="button" onClick={() => selectSpot(spot)}>
                     <h3 className="saved-title">{spot.title}</h3>
@@ -676,8 +660,10 @@ export default function LoreApp() {
                 </article>
               ))}
             </div>
-          </section>
-        ) : null}
+          ) : (
+            <div className="empty-state">Save spots from the detail panel to keep them here.</div>
+          )}
+        </details>
       </aside>
 
       <section className="map-region" aria-label="Map">
@@ -686,7 +672,8 @@ export default function LoreApp() {
           spots={mapSpots}
           selectedSpotId={selectedSpot?.id ?? null}
           onSelectSpot={selectSpot}
-          userLocation={userLocation}
+          userLocation={mapUserLocation}
+          onMapClick={mode === "discover" ? handleDiscoverMapClick : undefined}
         />
         <div className="map-vignette" />
 
@@ -694,9 +681,15 @@ export default function LoreApp() {
           <button className="icon-button" type="button" onClick={handleSurprise} disabled={!surpriseSpot} aria-label="Surprise me">
             <Sparkles size={18} />
           </button>
-          <button className="icon-button" type="button" onClick={startWalkMode} aria-label="Toggle walk mode">
-            {walkMode ? <Radio size={18} /> : <Navigation size={18} />}
-          </button>
+          {mode === "discover" ? (
+            <button className="icon-button" type="button" onClick={pinCurrentView} aria-label="Pin current map view">
+              <MapPin size={18} />
+            </button>
+          ) : (
+            <button className="icon-button" type="button" onClick={startWalkMode} aria-label="Toggle walk mode">
+              {walkMode ? <Radio size={18} /> : <Navigation size={18} />}
+            </button>
+          )}
           <button className="icon-button" type="button" onClick={refresh} disabled={loadState === "loading"} aria-label="Refresh stories">
             <RefreshCw size={18} />
           </button>
@@ -704,9 +697,16 @@ export default function LoreApp() {
 
         {selectedSpot ? (
           <article className="detail-panel" aria-label={`${selectedSpot.title} details`}>
+            <button
+              className="icon-button close-button detail-close"
+              type="button"
+              onClick={() => setSelectedSpotId(null)}
+              aria-label="Close details"
+            >
+              <X size={18} />
+            </button>
             {selectedSpot.imageUrl ? <img className="detail-media" src={selectedSpot.imageUrl} alt="" /> : null}
             <div className="detail-kicker-row">
-              <span className={`confidence-badge confidence-${selectedSpot.confidence}`}>{selectedSpot.confidence}</span>
               <span className="detail-theme">{themeLabel(selectedSpot.theme)}</span>
             </div>
             <h2 className="detail-title">{selectedSpot.title}</h2>
@@ -716,32 +716,49 @@ export default function LoreApp() {
               </span>
               <span className="spot-source">
                 <BookOpenText size={13} />
-                {selectedSpot.sourceLabel}
+                {selectedSpot.sourceName === "Wikipedia" ? "Wikipedia article" : "Wikidata record"}
               </span>
             </div>
-            {selectedSpotSources.length > 1 ? (
-              <div className="source-stack" aria-label="Spot sources">
-                {selectedSpotSources.map((source) => (
-                  <a className="source-chip" href={source.url} target="_blank" rel="noreferrer" key={source.name}>
-                    {source.name}
-                  </a>
-                ))}
-              </div>
-            ) : null}
-            <p className="detail-copy">{selectedSpot.whyThisMatters}</p>
-            {selectedSpot.signals.length > 0 ? (
-              <div className="detail-tags">
-                {selectedSpot.signals.map((signal) => (
-                  <span className="detail-tag" key={signal}>
-                    {signal}
+            {selectedSpotIntro ? <p className="detail-summary">{selectedSpotIntro}</p> : null}
+            {selectedSpot.facts.length > 0 ? (
+              <div className="detail-fact-list" aria-label="Spot facts">
+                {selectedSpot.facts.slice(0, 2).map((fact) => (
+                  <span className="detail-fact" key={fact}>
+                    {fact}
                   </span>
                 ))}
               </div>
             ) : null}
-            <p className="detail-note">
-              {selectedSpot.summary ??
-                "This place has a sourced location marker, but the summary is not available yet."}
-            </p>
+            {hasMoreDetail ? (
+              <button
+                className="learn-more-button"
+                type="button"
+                onClick={() => setDetailExpanded((current) => !current)}
+                aria-expanded={detailExpanded}
+              >
+                {detailExpanded ? "Show less" : "Show more"}
+              </button>
+            ) : null}
+            {detailExpanded && hasMoreDetail ? (
+              <div className="detail-deep">
+                {selectedSpotMoreNarrative.map((sentence) => (
+                  <p className="detail-copy" key={sentence}>
+                    {sentence}
+                  </p>
+                ))}
+                {selectedSpot.facts.length > 2 ? (
+                  <div className="detail-fact-list" aria-label="More spot facts">
+                    {selectedSpot.facts.slice(2).map((fact) => (
+                      <span className="detail-fact" key={fact}>
+                        {fact}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                {selectedSpot.whyThisMatters ? <p className="detail-context">Context: {selectedSpot.whyThisMatters}</p> : null}
+              </div>
+            ) : null}
+            {!detailExpanded ? <p className="detail-note">Click Show more for the longer article excerpt and more facts.</p> : null}
             <div className="detail-actions">
               <div className="detail-primary-actions">
                 <SaveSpotButton spot={selectedSpot} saved={savedSpotIds.has(selectedSpot.id)} onToggle={toggleSavedSpot} showLabel />
@@ -750,15 +767,19 @@ export default function LoreApp() {
                   <ExternalLink size={15} />
                 </a>
               </div>
-              <button
-                className="icon-button close-button"
-                type="button"
-                onClick={() => setSelectedSpotId(null)}
-                aria-label="Close details"
-              >
-                <X size={18} />
-              </button>
             </div>
+            {selectedSpotSources.length > 1 ? (
+              <div className="detail-source-note" aria-label="Sources">
+                <span className="detail-source-label">Sources:</span>
+                <div className="detail-source-list">
+                  {selectedSpotSources.map((source) => (
+                    <a className="detail-source-link" href={source.url} target="_blank" rel="noreferrer" key={source.name}>
+                      {source.name}
+                    </a>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           </article>
         ) : null}
 

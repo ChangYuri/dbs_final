@@ -10,15 +10,13 @@ export type PlanningLocation = LocationPoint & {
 };
 
 export type SpotTheme =
-  | "firsts"
-  | "education"
-  | "civil-rights"
-  | "events"
   | "people"
-  | "architecture"
+  | "places"
+  | "events"
+  | "institutions"
   | "transport"
   | "culture"
-  | "landmark";
+  | "landmarks";
 
 export type SpotSourceName = "Wikipedia" | "Wikidata";
 
@@ -28,8 +26,6 @@ export type SpotSource = {
   quality: number;
 };
 
-export type SpotConfidence = "high" | "medium" | "low";
-
 export type Spot = {
   id: string;
   title: string;
@@ -37,6 +33,9 @@ export type Spot = {
   lng: number;
   distanceMeters?: number;
   summary?: string;
+  teaser: string;
+  narrative: string[];
+  facts: string[];
   sourceName: SpotSourceName;
   sourceUrl: string;
   imageUrl?: string;
@@ -47,10 +46,9 @@ export type Spot = {
   theme: SpotTheme;
   signals: string[];
   whyThisMatters: string;
-  confidence: SpotConfidence;
 };
 
-type SpotSeed = Omit<Spot, "theme" | "signals" | "whyThisMatters" | "confidence">;
+type SpotSeed = Omit<Spot, "theme" | "signals" | "whyThisMatters">;
 
 type WikipediaPage = {
   pageid: number;
@@ -58,6 +56,7 @@ type WikipediaPage = {
   index?: number;
   fullurl?: string;
   extract?: string;
+  missing?: string;
   thumbnail?: {
     source?: string;
   };
@@ -70,8 +69,18 @@ type WikipediaPage = {
 type WikipediaResponse = {
   query?: {
     pages?: Record<string, WikipediaPage>;
+    normalized?: Array<{
+      from: string;
+      to: string;
+    }>;
+    redirects?: Array<{
+      from: string;
+      to: string;
+    }>;
   };
 };
+
+type WikipediaPagesResponse = WikipediaResponse;
 
 type WikidataBinding = {
   item: {
@@ -87,6 +96,15 @@ type WikidataBinding = {
     value: string;
   };
   article?: {
+    value: string;
+  };
+  inception?: {
+    value: string;
+  };
+  architectLabel?: {
+    value: string;
+  };
+  instanceOfLabel?: {
     value: string;
   };
 };
@@ -115,39 +133,33 @@ type NominatimPlace = {
 };
 
 const HISTORY_THEME_ORDER: SpotTheme[] = [
-  "firsts",
-  "education",
-  "civil-rights",
-  "events",
   "people",
-  "architecture",
+  "places",
+  "events",
+  "institutions",
   "transport",
   "culture",
-  "landmark"
+  "landmarks"
 ];
 
 const THEME_LABELS: Record<SpotTheme, string> = {
-  firsts: "Firsts",
-  education: "Education",
-  "civil-rights": "Civil rights",
-  events: "Events",
   people: "People",
-  architecture: "Architecture",
+  places: "Places",
+  events: "Events",
+  institutions: "Institutions",
   transport: "Transport",
   culture: "Culture",
-  landmark: "Landmark"
+  landmarks: "Landmarks"
 };
 
 const THEME_REASONS: Record<SpotTheme, string> = {
-  firsts: "A first-of-its-kind or earliest-known local story.",
-  education: "A school, campus, or learning milestone with local history.",
-  "civil-rights": "A place tied to rights, access, or social change.",
-  events: "A notable event happened here or nearby.",
   people: "A place linked to an important person or family story.",
-  architecture: "A building, structure, or former site with a strong place story.",
-  transport: "A road, bridge, or route that carried daily movement and history.",
+  places: "A place with a local story worth noticing.",
+  events: "A notable event happened here or nearby.",
+  institutions: "A school, organization, or civic institution shaped this place.",
+  transport: "A road, bridge, station, or route that carried daily movement and history.",
   culture: "A cultural, artistic, or community history spot.",
-  landmark: "A good general history lead with a useful sourced location."
+  landmarks: "A landmark or built place that anchors the area."
 };
 
 const SIGNAL_RULES: Array<{
@@ -206,6 +218,9 @@ export const DEFAULT_RADIUS_METERS = 1400;
 export const REFRESH_DISTANCE_METERS = 180;
 const WIKIPEDIA_SOURCE_QUALITY = 4;
 const WIKIDATA_SOURCE_QUALITY = 3;
+const WIKIPEDIA_EXTRACT_SENTENCES = 10;
+const MAX_NARRATIVE_SENTENCES = 12;
+const WIKIPEDIA_TITLE_CONCURRENCY = 8;
 
 export function distanceMeters(a: Pick<LocationPoint, "lat" | "lng">, b: Pick<LocationPoint, "lat" | "lng">) {
   const earthRadius = 6371000;
@@ -270,7 +285,10 @@ export async function fetchNearbySpots(location: LocationPoint, radiusMeters = D
     }
   }
 
-  return rankSpots(dedupeSpots(spots), location);
+  const dedupedSpots = dedupeSpots(spots);
+  const hydratedSpots = await hydrateWikipediaProse(dedupedSpots);
+
+  return rankSpots(hydratedSpots, location);
 }
 
 export async function fetchWikipediaSpots(location: LocationPoint, radiusMeters = DEFAULT_RADIUS_METERS) {
@@ -284,9 +302,8 @@ export async function fetchWikipediaSpots(location: LocationPoint, radiusMeters 
     ggslimit: "45",
     prop: "coordinates|pageimages|extracts|info",
     inprop: "url",
-    exintro: "1",
     explaintext: "1",
-    exsentences: "3",
+    exsentences: String(WIKIPEDIA_EXTRACT_SENTENCES),
     piprop: "thumbnail",
     pithumbsize: "700"
   });
@@ -320,6 +337,9 @@ export async function fetchWikipediaSpots(location: LocationPoint, radiusMeters 
         lng: point.lng,
         distanceMeters: distanceMeters(location, point),
         summary: cleanSummary(page.extract),
+        teaser: buildTeaser(page.extract),
+        narrative: buildNarrative(page.extract),
+        facts: [],
         sourceName: "Wikipedia",
         sourceUrl: page.fullurl ?? `https://en.wikipedia.org/?curid=${page.pageid}`,
         imageUrl: page.thumbnail?.source,
@@ -343,11 +363,22 @@ export async function fetchWikidataSpots(location: LocationPoint, radiusMeters =
   const radiusKilometers = Math.max(0.1, radiusMeters / 1000);
   const query = `
 PREFIX geo: <http://www.opengis.net/ont/geosparql#>
-SELECT ?item ?itemLabel ?itemDescription ?coord ?article WHERE {
+SELECT ?item ?itemLabel ?itemDescription ?coord ?article ?inception ?architectLabel ?instanceOfLabel WHERE {
   SERVICE wikibase:around {
     ?item wdt:P625 ?coord.
     bd:serviceParam wikibase:center "Point(${location.lng} ${location.lat})"^^geo:wktLiteral.
     bd:serviceParam wikibase:radius "${radiusKilometers}".
+  }
+  OPTIONAL { ?item wdt:P571 ?inception. }
+  OPTIONAL {
+    ?item wdt:P84 ?architect.
+    ?architect rdfs:label ?architectLabel.
+    FILTER(LANG(?architectLabel) = "en")
+  }
+  OPTIONAL {
+    ?item wdt:P31 ?instanceOf.
+    ?instanceOf rdfs:label ?instanceOfLabel.
+    FILTER(LANG(?instanceOfLabel) = "en")
   }
   OPTIONAL {
     ?article schema:about ?item;
@@ -379,6 +410,12 @@ LIMIT 60
 
   const data = (await response.json()) as WikidataResponse;
   const bindings = data.results?.bindings ?? [];
+  const articleTitles = uniqueStrings(
+    bindings
+      .flatMap((binding) => [extractWikipediaTitle(binding.article?.value), binding.itemLabel?.value])
+      .filter((title): title is string => Boolean(title))
+  );
+  const wikipediaPagesByTitle = await fetchWikipediaPagesByTitles(articleTitles);
 
   return bindings
     .map((binding): Spot | null => {
@@ -390,6 +427,32 @@ LIMIT 60
       }
 
       const sourceUrl = binding.article?.value ?? binding.item.value;
+      const articleTitle = extractWikipediaTitle(binding.article?.value);
+      const wikipediaPage =
+        (articleTitle ? wikipediaPagesByTitle.get(articleTitle) : undefined) ?? wikipediaPagesByTitle.get(title);
+      const summarySource = wikipediaPage?.extract ?? binding.itemDescription?.value;
+      const sourceName: SpotSourceName = wikipediaPage ? "Wikipedia" : "Wikidata";
+      const sourceLabel = wikipediaPage ? "Wikipedia + Wikidata" : "Wikidata";
+      const sources = wikipediaPage
+        ? [
+            {
+              name: "Wikipedia" as const,
+              url: wikipediaPage.fullurl ?? sourceUrl,
+              quality: WIKIPEDIA_SOURCE_QUALITY
+            },
+            {
+              name: "Wikidata" as const,
+              url: binding.item.value,
+              quality: WIKIDATA_SOURCE_QUALITY
+            }
+          ]
+        : [
+            {
+              name: "Wikidata" as const,
+              url: sourceUrl,
+              quality: WIKIDATA_SOURCE_QUALITY
+            }
+          ];
 
       return enrichSpot({
         id: `wikidata:${binding.item.value.split("/").pop() ?? title}`,
@@ -397,18 +460,15 @@ LIMIT 60
         lat: point.lat,
         lng: point.lng,
         distanceMeters: distanceMeters(location, point),
-        summary: cleanSummary(binding.itemDescription?.value),
-        sourceName: "Wikidata",
-        sourceUrl,
-        sources: [
-          {
-            name: "Wikidata",
-            url: sourceUrl,
-            quality: WIKIDATA_SOURCE_QUALITY
-          }
-        ],
-        sourceLabel: "Wikidata",
-        matchCount: 1,
+        summary: cleanSummary(summarySource),
+        teaser: buildTeaser(summarySource),
+        narrative: buildNarrative(summarySource),
+        facts: buildWikidataFacts(binding),
+        sourceName,
+        sourceUrl: wikipediaPage?.fullurl ?? sourceUrl,
+        sources,
+        sourceLabel,
+        matchCount: sources.length,
         relevanceScore: 0
       });
     })
@@ -465,18 +525,60 @@ export async function searchPlanningLocations(query: string): Promise<PlanningLo
     .filter((place): place is PlanningLocation => Boolean(place));
 }
 
+export async function hydrateSpotFromWikipediaTitle(spot: Spot): Promise<Spot> {
+  const wikipediaPagesByTitle = await fetchWikipediaPagesByTitles([spot.title]);
+  const wikipediaPage = wikipediaPagesByTitle.get(spot.title);
+
+  if (!wikipediaPage?.extract) {
+    return spot;
+  }
+
+  const prose = cleanSummary(wikipediaPage.extract);
+
+  if (!prose) {
+    return spot;
+  }
+
+  const wikipediaSource: SpotSource = {
+    name: "Wikipedia",
+    url: wikipediaPage.fullurl ?? `https://en.wikipedia.org/wiki/${encodeURIComponent(wikipediaPage.title.replace(/\s+/g, "_"))}`,
+    quality: WIKIPEDIA_SOURCE_QUALITY
+  };
+  const sources = [
+    wikipediaSource,
+    ...spot.sources.filter((source) => source.name !== "Wikipedia")
+  ].sort((a, b) => b.quality - a.quality);
+
+  return enrichSpot({
+    ...spot,
+    sourceName: "Wikipedia",
+    sourceUrl: wikipediaSource.url,
+    sourceLabel: sources.length > 1 ? "Wikipedia + Wikidata" : "Wikipedia",
+    sources,
+    matchCount: sources.length,
+    summary: prose,
+    teaser: buildTeaser(prose),
+    narrative: buildNarrative(prose)
+  });
+}
+
 function enrichSpot(spot: SpotSeed): Spot {
   const context = [spot.title, spot.summary ?? "", spot.sourceLabel].join(" ");
   const theme = detectTheme(context);
   const signals = extractSignals(context);
-  const confidence = deriveConfidence(spot.sources.length, Boolean(spot.summary), Boolean(spot.imageUrl), signals.length);
+  const narrative = normalizeUniqueStrings(
+    [spot.teaser, ...spot.narrative].filter((line): line is string => Boolean(line && line.trim()))
+  );
+  const facts = normalizeUniqueStrings(spot.facts.filter((fact) => Boolean(fact && fact.trim()))).slice(0, 5);
 
   return {
     ...spot,
+    teaser: spot.teaser || narrative[0] || spot.summary || spot.title,
+    narrative: narrative.length > 0 ? narrative : [spot.teaser || spot.summary || spot.title],
+    facts,
     theme,
     signals,
-    confidence,
-    whyThisMatters: buildWhyThisMatters(theme, signals)
+    whyThisMatters: buildWhyThisMatters(theme)
   };
 }
 
@@ -486,6 +588,163 @@ function cleanSummary(summary?: string) {
   }
 
   return summary.replace(/\s+/g, " ").trim();
+}
+
+function buildNarrative(text?: string) {
+  const cleaned = cleanSummary(text);
+
+  if (!cleaned) {
+    return [];
+  }
+
+  return splitSentences(cleaned).slice(0, MAX_NARRATIVE_SENTENCES);
+}
+
+function buildTeaser(text?: string) {
+  const sentences = buildNarrative(text);
+
+  if (sentences.length === 0) {
+    return cleanSummary(text) ?? "";
+  }
+
+  const highlight = sentences.slice(1).find(isCompellingSentence);
+  const teaserSentences = highlight && highlight !== sentences[0] ? [sentences[0], highlight] : sentences.slice(0, 2);
+  const teaser = teaserSentences.filter(Boolean).join(" ");
+
+  if (teaser.length <= 320) {
+    return teaser;
+  }
+
+  const firstTwo = sentences.slice(0, 2).join(" ");
+  return firstTwo.length <= 260 ? firstTwo : sentences[0];
+}
+
+function buildWikidataFacts(binding: WikidataBinding) {
+  const facts: string[] = [];
+
+  if (binding.architectLabel?.value) {
+    facts.push(`Architect: ${binding.architectLabel.value}`);
+  }
+
+  if (binding.inception?.value) {
+    const year = formatYear(binding.inception.value);
+
+    if (year) {
+      facts.push(`Opened: ${year}`);
+    }
+  }
+
+  return facts;
+}
+
+function isCompellingSentence(sentence: string) {
+  return /(\bserved as\b|\bhost\b|\bvisited\b|\bstayed\b|\bbrought\b|\bwelcomed\b|\bpeople\b|\bdignitaries\b|\bopened\b|\bbuilt\b|\bfounded\b|\bfirst\b|\boldest\b|\bpresident\b|\bprince\b|\bqueen\b|\bking\b|\barchitect\b)/i.test(
+    sentence
+  );
+}
+
+async function fetchWikipediaPagesByTitles(titles: string[]) {
+  const uniqueTitles = uniqueStrings(titles.map((title) => title.trim()).filter(Boolean));
+
+  if (uniqueTitles.length === 0) {
+    return new Map<string, WikipediaPage>();
+  }
+
+  const pageMap = new Map<string, WikipediaPage>();
+
+  for (let index = 0; index < uniqueTitles.length; index += WIKIPEDIA_TITLE_CONCURRENCY) {
+    const titleBatch = uniqueTitles.slice(index, index + WIKIPEDIA_TITLE_CONCURRENCY);
+    const pages = await Promise.all(titleBatch.map((title) => fetchWikipediaPageByTitle(title)));
+
+    pages.forEach(({ requestedTitle, page }) => {
+      if (!page) {
+        return;
+      }
+
+      pageMap.set(requestedTitle, page);
+      pageMap.set(page.title, page);
+    });
+  }
+
+  return pageMap;
+}
+
+async function fetchWikipediaPageByTitle(requestedTitle: string) {
+  const params = new URLSearchParams({
+    action: "query",
+    format: "json",
+    origin: "*",
+    titles: requestedTitle,
+    redirects: "1",
+    prop: "coordinates|pageimages|extracts|info",
+    inprop: "url",
+    explaintext: "1",
+    exsentences: String(WIKIPEDIA_EXTRACT_SENTENCES),
+    piprop: "thumbnail",
+    pithumbsize: "700"
+  });
+
+  const response = await fetch(`https://en.wikipedia.org/w/api.php?${params.toString()}`);
+
+  if (!response.ok) {
+    throw new Error(`Wikipedia returned ${response.status}`);
+  }
+
+  const data = (await response.json()) as WikipediaPagesResponse;
+  const page = Object.values(data.query?.pages ?? {}).find((candidate) => !candidate.missing);
+
+  return {
+    requestedTitle,
+    page
+  };
+}
+
+async function hydrateWikipediaProse(spots: Spot[]): Promise<Spot[]> {
+  const titles = uniqueStrings(
+    spots.flatMap((spot) => {
+      return spot.sources
+        .map((source) => extractWikipediaTitle(source.url))
+        .filter((title): title is string => Boolean(title));
+    })
+  );
+
+  if (titles.length === 0) {
+    return spots;
+  }
+
+  const wikipediaPagesByTitle = await fetchWikipediaPagesByTitles(titles);
+
+  return spots.map((spot) => {
+    const wikipediaTitle = spot.sources
+      .map((source) => extractWikipediaTitle(source.url))
+      .find((title): title is string => Boolean(title));
+
+    if (!wikipediaTitle) {
+      return spot;
+    }
+
+    const wikipediaPage = wikipediaPagesByTitle.get(wikipediaTitle);
+
+    if (!wikipediaPage?.extract) {
+      return spot;
+    }
+
+    const prose = cleanSummary(wikipediaPage.extract);
+
+    if (!prose) {
+      return spot;
+    }
+
+    return {
+      ...spot,
+      sourceName: "Wikipedia" as SpotSourceName,
+      sourceUrl: wikipediaPage.fullurl ?? spot.sourceUrl,
+      sourceLabel: spot.sources.length > 1 ? "Wikipedia + Wikidata" : "Wikipedia",
+      summary: prose,
+      teaser: buildTeaser(prose),
+      narrative: buildNarrative(prose)
+    };
+  });
 }
 
 function parseWikidataPoint(value?: string) {
@@ -507,6 +766,25 @@ function parseWikidataPoint(value?: string) {
   }
 
   return { lat, lng };
+}
+
+function extractWikipediaTitle(value?: string) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+    const title = url.pathname.split("/").pop();
+    return title ? decodeURIComponent(title.replace(/_/g, " ")) : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatYear(value: string) {
+  const yearMatch = value.match(/^(\d{4})/);
+  return yearMatch?.[1] ?? null;
 }
 
 function dedupeSpots(spots: Spot[]) {
@@ -548,18 +826,29 @@ function mergeSpot(target: Spot, incoming: Spot) {
   const bestSource = mergedSources[0];
   const betterTheme = pickBetterTheme(target.theme, incoming.theme);
   const mergedSignals = uniqueStrings([...target.signals, ...incoming.signals]).slice(0, 4);
+  const incomingIsWikipedia = incoming.sourceName === "Wikipedia";
+  const mergedNarrative = incomingIsWikipedia
+    ? normalizeUniqueStrings([...incoming.narrative, ...target.narrative]).slice(0, MAX_NARRATIVE_SENTENCES)
+    : normalizeUniqueStrings([...target.narrative, ...incoming.narrative]).slice(0, MAX_NARRATIVE_SENTENCES);
+  const mergedFacts = normalizeUniqueStrings([...target.facts, ...incoming.facts]).slice(0, 5);
 
   target.sources = mergedSources;
   target.sourceName = bestSource.name;
   target.sourceUrl = bestSource.url;
   target.sourceLabel = mergedSources.map((source) => source.name).join(" + ");
   target.matchCount = mergedSources.length;
+  target.teaser = incomingIsWikipedia
+    ? incoming.teaser || target.teaser || mergedNarrative[0] || target.title
+    : target.teaser || incoming.teaser || mergedNarrative[0] || target.title;
+  target.narrative = mergedNarrative.length > 0 ? mergedNarrative : [target.teaser];
+  target.facts = mergedFacts;
   target.theme = betterTheme;
   target.signals = mergedSignals;
-  target.confidence = deriveConfidence(mergedSources.length, Boolean(target.summary || incoming.summary), Boolean(target.imageUrl || incoming.imageUrl), mergedSignals.length);
-  target.whyThisMatters = buildWhyThisMatters(betterTheme, mergedSignals);
+  target.whyThisMatters = buildWhyThisMatters(betterTheme);
 
-  if (!target.summary && incoming.summary) {
+  if (incomingIsWikipedia) {
+    target.summary = incoming.summary ?? target.summary;
+  } else if (!target.summary || (incoming.summary && incoming.summary.length > target.summary.length)) {
     target.summary = incoming.summary;
   }
 
@@ -573,23 +862,24 @@ function rankSpots(spots: Spot[], location: LocationPoint) {
     .map((spot) => {
       const distance = distanceMeters(location, spot);
       const sourceQuality = spot.sources.reduce((total, source) => total + source.quality, 0);
-      const summaryBonus = spot.summary ? 1.3 : 0;
+      const summaryBonus = spot.summary || spot.teaser ? 1.3 : 0;
       const imageBonus = spot.imageUrl ? 0.5 : 0;
       const signalBonus = Math.min(spot.signals.length, 4) * 0.35;
-      const confidenceBonus = spot.confidence === "high" ? 0.7 : spot.confidence === "medium" ? 0.35 : 0;
       const themeBonus =
-        spot.theme === "firsts"
-          ? 1.6
-          : spot.theme === "education"
-            ? 1.2
-            : spot.theme === "civil-rights"
-              ? 1.1
-              : spot.theme === "events"
-                ? 0.8
-                : spot.theme === "people"
-                  ? 0.7
-                  : 0.4;
-      const historicCueBonus = countHistoricalCues(`${spot.title} ${spot.summary ?? ""}`);
+        spot.theme === "events"
+          ? 1.3
+          : spot.theme === "institutions"
+            ? 1.15
+            : spot.theme === "people"
+              ? 1
+              : spot.theme === "landmarks"
+                ? 0.95
+                : spot.theme === "transport"
+                  ? 0.9
+                  : spot.theme === "culture"
+                    ? 0.85
+                    : 0.7;
+      const historicCueBonus = countHistoricalCues(`${spot.title} ${spot.summary ?? spot.teaser}`);
       const distancePenalty = Math.min(distance / DEFAULT_RADIUS_METERS, 1.6);
 
       return {
@@ -601,7 +891,6 @@ function rankSpots(spots: Spot[], location: LocationPoint) {
           summaryBonus +
           imageBonus +
           signalBonus +
-          confidenceBonus +
           themeBonus +
           historicCueBonus -
           distancePenalty
@@ -613,28 +902,20 @@ function rankSpots(spots: Spot[], location: LocationPoint) {
 function detectTheme(text: string) {
   const normalizedText = text.toLowerCase();
 
-  if (/\b(first|oldest|earliest|inaugural|pioneer)\b/.test(normalizedText)) {
-    return "firsts";
-  }
-
-  if (/\b(school|academy|university|college|institute|education|students?|teachers?)\b/.test(normalizedText)) {
-    return "education";
-  }
-
-  if (/\b(civil rights|suffrage|desegregation|labor|strike|union|protest|equality)\b/.test(normalizedText)) {
-    return "civil-rights";
+  if (/\b(school|academy|university|college|institute|education|students?|teachers?|museum|church|organization|society)\b/.test(normalizedText)) {
+    return "institutions";
   }
 
   if (/\b(battle|riot|massacre|fire|flood|earthquake|war|event|tragedy)\b/.test(normalizedText)) {
     return "events";
   }
 
-  if (/\b(emperor|king|queen|ruler|president|leader|born|lived|home|residence|memorial|statue)\b/.test(normalizedText)) {
+  if (/\b(emperor|king|queen|ruler|president|leader|born|lived|home|residence|memorial|statue|person|family)\b/.test(normalizedText)) {
     return "people";
   }
 
-  if (/\b(building|house|residence|church|library|museum|hall|tower|courthouse|hotel|architecture)\b/.test(normalizedText)) {
-    return "architecture";
+  if (/\b(former site|site of|district|neighborhood|square|park|field|block|grounds|location)\b/.test(normalizedText)) {
+    return "places";
   }
 
   if (/\b(road|street|avenue|bridge|station|railway|railroad|canal|tunnel|port|harbor|highway)\b/.test(normalizedText)) {
@@ -645,7 +926,15 @@ function detectTheme(text: string) {
     return "culture";
   }
 
-  return "landmark";
+  if (/\b(building|house|residence|church|library|museum|hall|tower|courthouse|hotel|architecture|landmark)\b/.test(normalizedText)) {
+    return "landmarks";
+  }
+
+  if (/\b(first|oldest|earliest|inaugural|pioneer)\b/.test(normalizedText)) {
+    return "events";
+  }
+
+  return "places";
 }
 
 function extractSignals(text: string) {
@@ -660,31 +949,8 @@ function extractSignals(text: string) {
   return uniqueStrings(signals).slice(0, 4);
 }
 
-function deriveConfidence(
-  sourceCount: number,
-  hasSummary: boolean,
-  hasImage: boolean,
-  signalCount: number
-): SpotConfidence {
-  if (sourceCount >= 2 && hasSummary) {
-    return "high";
-  }
-
-  if (hasSummary || hasImage || signalCount >= 2) {
-    return "medium";
-  }
-
-  return "low";
-}
-
-function buildWhyThisMatters(theme: SpotTheme, signals: string[]) {
-  const parts = [THEME_REASONS[theme]];
-
-  if (signals.length > 0) {
-    parts.push(`Signals: ${signals.slice(0, 2).join(", ")}.`);
-  }
-
-  return parts.join(" ");
+function buildWhyThisMatters(theme: SpotTheme) {
+  return THEME_REASONS[theme];
 }
 
 function countHistoricalCues(text: string) {
@@ -715,6 +981,17 @@ function themeRank(theme: SpotTheme) {
 
 function uniqueStrings(values: string[]) {
   return values.filter((value, index, array) => array.indexOf(value) === index);
+}
+
+function normalizeUniqueStrings(values: string[]) {
+  return uniqueStrings(values.map((value) => value.trim()).filter(Boolean));
+}
+
+function splitSentences(text: string) {
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
 }
 
 function normalizeTitle(title: string) {
