@@ -47,6 +47,9 @@ function normalizeSpot(spot: Spot): SavedSpot {
     lng: spot.lng,
     distanceMeters: spot.distanceMeters,
     summary: spot.summary,
+    teaser: spot.teaser ?? (spot.summary ? spot.summary.split(/(?<=[.!?])\s+/)[0] : spot.title),
+    narrative: spot.narrative?.length ? spot.narrative : spot.summary ? spot.summary.split(/(?<=[.!?])\s+/).slice(0, 8) : [spot.title],
+    facts: spot.facts ?? [],
     sourceName: spot.sourceName,
     sourceUrl: spot.sourceUrl,
     imageUrl: spot.imageUrl,
@@ -54,10 +57,9 @@ function normalizeSpot(spot: Spot): SavedSpot {
     sourceLabel: spot.sourceLabel ?? sources.map((source) => source.name).join(" + "),
     matchCount: spot.matchCount ?? sources.length,
     relevanceScore: spot.relevanceScore ?? 0,
-    theme: spot.theme ?? "landmark",
+    theme: spot.theme ?? "landmarks",
     signals: spot.signals ?? [],
-    whyThisMatters: spot.whyThisMatters ?? "",
-    confidence: spot.confidence ?? "low"
+    whyThisMatters: spot.whyThisMatters ?? ""
   };
 }
 

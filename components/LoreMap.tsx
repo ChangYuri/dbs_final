@@ -10,9 +10,17 @@ type LoreMapProps = {
   selectedSpotId: string | null;
   onSelectSpot: (spot: Spot) => void;
   userLocation: LocationPoint | null;
+  onMapClick?: (location: LocationPoint) => void;
 };
 
-export default function LoreMap({ center, spots, selectedSpotId, onSelectSpot, userLocation }: LoreMapProps) {
+export default function LoreMap({
+  center,
+  spots,
+  selectedSpotId,
+  onSelectSpot,
+  userLocation,
+  onMapClick
+}: LoreMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markerLayerRef = useRef<L.LayerGroup | null>(null);
@@ -94,8 +102,8 @@ export default function LoreMap({ center, spots, selectedSpotId, onSelectSpot, u
         const icon = leaflet.default.divIcon({
           html: `<span class="lore-marker${selected ? " is-selected" : ""}${themeClass}" aria-hidden="true"></span>`,
           className: "lore-marker-wrap",
-          iconSize: selected ? [34, 34] : [28, 28],
-          iconAnchor: selected ? [17, 34] : [14, 28]
+          iconSize: selected ? [22, 22] : [14, 14],
+          iconAnchor: selected ? [11, 11] : [7, 7]
         });
 
         leaflet.default.marker([spot.lat, spot.lng], { icon, keyboard: true, title: spot.title })
@@ -120,10 +128,14 @@ export default function LoreMap({ center, spots, selectedSpotId, onSelectSpot, u
 
     void import("leaflet").then((leaflet) => {
       const icon = leaflet.default.divIcon({
-        html: '<span class="lore-location-dot" aria-hidden="true"></span>',
+        html:
+          '<span class="lore-location-marker" aria-hidden="true">' +
+          '<span class="lore-location-ring"></span>' +
+          '<span class="lore-location-core"></span>' +
+          "</span>",
         className: "lore-location-wrap",
-        iconSize: [18, 18],
-        iconAnchor: [9, 9]
+        iconSize: [26, 26],
+        iconAnchor: [13, 13]
       });
 
       leaflet.default.marker([userLocation.lat, userLocation.lng], {
@@ -145,5 +157,27 @@ export default function LoreMap({ center, spots, selectedSpotId, onSelectSpot, u
     map.panTo([selected.lat, selected.lng], { animate: true, duration: 0.45 });
   }, [selectedSpotId, spots]);
 
-  return <div ref={containerRef} className="map-canvas" aria-label="Lore map" />;
+  useEffect(() => {
+    const map = mapRef.current;
+
+    if (!map || !onMapClick) {
+      return;
+    }
+
+    const handleMapClick = (event: L.LeafletMouseEvent) => {
+      onMapClick({
+        lat: event.latlng.lat,
+        lng: event.latlng.lng,
+        label: "Pinned location"
+      });
+    };
+
+    map.on("click", handleMapClick);
+
+    return () => {
+      map.off("click", handleMapClick);
+    };
+  }, [onMapClick]);
+
+  return <div ref={containerRef} className={`map-canvas${onMapClick ? " is-pinnable" : ""}`} aria-label="Lore map" />;
 }
