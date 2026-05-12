@@ -185,13 +185,43 @@ Open decision:
 
 ### Version 3: Persistence and Personalization
 
-Goal: support repeat use without making the architecture heavier than necessary.
+Goal: make Lore feel worth returning to without turning it into an account-heavy app.
 
-- Add auth only when it becomes required for saving or syncing across devices.
-- Keep saved spots in Supabase instead of local storage once persistence is enabled.
-- Keep cache metadata in the same Supabase-backed cache layer described in Version 2.
-- Add per-user collections only if the product needs them.
-- Add shareable spot links if the routing model is stable.
+- Keep the app usable without login by default.
+- Use Supabase as the database layer for saved spots and other user-owned data.
+- Move saved spots off `localStorage` once persistence is wired through Supabase.
+- Use Vercel-backed authentication only when the user tries to save a place or open the deeper `Read more` experience.
+- Persist lightweight user-owned data first:
+  - saved spots
+  - recent planning searches
+  - simple preferences like default mode or last-used location
+- Keep discovery cache separate from user-owned data so cached places remain replaceable and not part of the user profile.
+- Add shareable spot links if the routing model is stable enough to reopen a specific place cleanly.
+- Add per-user collections only if a clear collection workflow appears in the product.
+
+#### 3A. Persistence Model
+
+- Keep browsing public and low-friction.
+- Treat auth as a targeted gate for saving and richer personal actions, not as a requirement for basic discovery.
+- Keep the Supabase schema small and practical.
+- Prefer one clean user-data layer instead of splitting persistence across multiple systems.
+
+#### 3B. Frontend Polish
+
+Goal: make the app feel clean, simple, and intuitive.
+
+- Greatly improve the frontend UI and UX.
+- Favor a straightforward information hierarchy with fewer competing controls.
+- Make the map, sidebar, and detail panel feel seamless together.
+- Reduce visual noise, dense copy, and unclear interaction states.
+- Keep actions obvious and the reading flow easy to follow.
+- Prioritize clarity, consistency, and speed of understanding over feature count.
+
+Implementation bias:
+
+- Prefer a local-first UX with optional account features layered on top.
+- Avoid introducing a full social or collaboration model at this stage.
+- Treat personalization as convenience, not a requirement for basic browsing.
 
 ### Version 4: AI Fallback and Richer Storytelling
 
