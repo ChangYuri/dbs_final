@@ -18,7 +18,7 @@ export type SpotTheme =
   | "culture"
   | "landmarks";
 
-export type SpotSourceName = "Wikipedia" | "Wikidata";
+export type SpotSourceName = "Wikipedia" | "Wikidata" | "User note";
 
 export type SpotSource = {
   name: SpotSourceName;
@@ -220,7 +220,12 @@ const WIKIPEDIA_SOURCE_QUALITY = 4;
 const WIKIDATA_SOURCE_QUALITY = 3;
 const WIKIPEDIA_EXTRACT_SENTENCES = 10;
 const MAX_NARRATIVE_SENTENCES = 12;
-const WIKIPEDIA_TITLE_CONCURRENCY = 8;
+const WIKIPEDIA_TITLE_BATCH_SIZE = 40;
+const WIKIPEDIA_MAX_HYDRATION_TITLES = 30;
+const RATE_LIMITED_STATUS_CODES = new Set([429, 503]);
+const REQUEST_RETRY_DELAYS_MS = [800, 1600, 3200];
+const wikipediaPageCache = new Map<string, WikipediaPage | null>();
+const wikipediaPageRequests = new Map<string, Promise<WikipediaPage | null | undefined>>();
 
 export function distanceMeters(a: Pick<LocationPoint, "lat" | "lng">, b: Pick<LocationPoint, "lat" | "lng">) {
   const earthRadius = 6371000;
@@ -303,12 +308,15 @@ export async function fetchWikipediaSpots(location: LocationPoint, radiusMeters 
     prop: "coordinates|pageimages|extracts|info",
     inprop: "url",
     explaintext: "1",
+    exintro: "1",
     exsentences: String(WIKIPEDIA_EXTRACT_SENTENCES),
+    exlimit: "max",
     piprop: "thumbnail",
+    pilimit: "max",
     pithumbsize: "700"
   });
 
-  const response = await fetch(`https://en.wikipedia.org/w/api.php?${params.toString()}`);
+  const response = await fetchWithRetry(`https://en.wikipedia.org/w/api.php?${params.toString()}`);
 
   if (!response.ok) {
     throw new Error(`Wikipedia returned ${response.status}`);
@@ -398,7 +406,7 @@ LIMIT 60
     format: "json"
   });
 
-  const response = await fetch(`https://query.wikidata.org/sparql?${params.toString()}`, {
+  const response = await fetchWithRetry(`https://query.wikidata.org/sparql?${params.toString()}`, {
     headers: {
       Accept: "application/sparql-results+json"
     }
@@ -562,6 +570,44 @@ export async function hydrateSpotFromWikipediaTitle(spot: Spot): Promise<Spot> {
   });
 }
 
+async function fetchWithRetry(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  for (let attempt = 0; attempt <= REQUEST_RETRY_DELAYS_MS.length; attempt += 1) {
+    const response = await fetch(input, init);
+
+    if (!RATE_LIMITED_STATUS_CODES.has(response.status) || attempt === REQUEST_RETRY_DELAYS_MS.length) {
+      return response;
+    }
+
+    await delay(getRetryDelayMs(response, attempt));
+  }
+
+  throw new Error("Request retry failed.");
+}
+
+function getRetryDelayMs(response: Response, attempt: number) {
+  const retryAfter = response.headers.get("Retry-After");
+
+  if (retryAfter) {
+    const retryAfterSeconds = Number.parseInt(retryAfter, 10);
+
+    if (Number.isFinite(retryAfterSeconds)) {
+      return retryAfterSeconds * 1000;
+    }
+
+    const retryAfterDate = Date.parse(retryAfter);
+
+    if (Number.isFinite(retryAfterDate)) {
+      return Math.max(0, retryAfterDate - Date.now());
+    }
+  }
+
+  return REQUEST_RETRY_DELAYS_MS[attempt] ?? REQUEST_RETRY_DELAYS_MS[REQUEST_RETRY_DELAYS_MS.length - 1];
+}
+
+function delay(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function enrichSpot(spot: SpotSeed): Spot {
   const context = [spot.title, spot.summary ?? "", spot.sourceLabel].join(" ");
   const theme = detectTheme(context);
@@ -651,17 +697,40 @@ async function fetchWikipediaPagesByTitles(titles: string[]) {
   }
 
   const pageMap = new Map<string, WikipediaPage>();
+  const uncachedTitles: string[] = [];
 
-  for (let index = 0; index < uniqueTitles.length; index += WIKIPEDIA_TITLE_CONCURRENCY) {
-    const titleBatch = uniqueTitles.slice(index, index + WIKIPEDIA_TITLE_CONCURRENCY);
-    const pages = await Promise.all(titleBatch.map((title) => fetchWikipediaPageByTitle(title)));
+  uniqueTitles.forEach((title) => {
+    if (wikipediaPageCache.has(title)) {
+      const cachedPage = wikipediaPageCache.get(title);
 
-    pages.forEach(({ requestedTitle, page }) => {
+      if (cachedPage) {
+        pageMap.set(title, cachedPage);
+      }
+
+      return;
+    }
+
+    uncachedTitles.push(title);
+  });
+
+  for (let index = 0; index < uncachedTitles.length; index += WIKIPEDIA_TITLE_BATCH_SIZE) {
+    const titleBatch = uncachedTitles.slice(index, index + WIKIPEDIA_TITLE_BATCH_SIZE);
+    const pagesByTitle = await fetchWikipediaPagesBatch(titleBatch);
+
+    if (!pagesByTitle) {
+      continue;
+    }
+
+    titleBatch.forEach((title) => {
+      const page = pagesByTitle.get(title) ?? null;
+
+      wikipediaPageCache.set(title, page);
+
       if (!page) {
         return;
       }
 
-      pageMap.set(requestedTitle, page);
+      pageMap.set(title, page);
       pageMap.set(page.title, page);
     });
   }
@@ -670,33 +739,97 @@ async function fetchWikipediaPagesByTitles(titles: string[]) {
 }
 
 async function fetchWikipediaPageByTitle(requestedTitle: string) {
+  const cachedPage = wikipediaPageCache.get(requestedTitle);
+
+  if (cachedPage !== undefined) {
+    return {
+      requestedTitle,
+      page: cachedPage
+    };
+  }
+
+  let request = wikipediaPageRequests.get(requestedTitle);
+
+  if (!request) {
+    request = fetchWikipediaPagesBatch([requestedTitle]).then((pagesByTitle) => pagesByTitle?.get(requestedTitle) ?? undefined);
+    wikipediaPageRequests.set(requestedTitle, request);
+  }
+
+  try {
+    const page = await request;
+
+    if (page !== undefined) {
+      wikipediaPageCache.set(requestedTitle, page);
+    }
+
+    return {
+      requestedTitle,
+      page: page ?? null
+    };
+  } finally {
+    wikipediaPageRequests.delete(requestedTitle);
+  }
+}
+
+async function fetchWikipediaPagesBatch(requestedTitles: string[]) {
+  const pageMap = new Map<string, WikipediaPage>();
+
+  if (requestedTitles.length === 0) {
+    return pageMap;
+  }
+
   const params = new URLSearchParams({
     action: "query",
     format: "json",
     origin: "*",
-    titles: requestedTitle,
+    titles: requestedTitles.join("|"),
     redirects: "1",
     prop: "coordinates|pageimages|extracts|info",
     inprop: "url",
     explaintext: "1",
+    exintro: "1",
     exsentences: String(WIKIPEDIA_EXTRACT_SENTENCES),
+    exlimit: "max",
     piprop: "thumbnail",
+    pilimit: "max",
     pithumbsize: "700"
   });
 
-  const response = await fetch(`https://en.wikipedia.org/w/api.php?${params.toString()}`);
+  let data: WikipediaPagesResponse;
 
-  if (!response.ok) {
-    throw new Error(`Wikipedia returned ${response.status}`);
+  try {
+    const response = await fetchWithRetry(`https://en.wikipedia.org/w/api.php?${params.toString()}`);
+
+    if (!response.ok) {
+      throw new Error(`Wikipedia returned ${response.status}`);
+    }
+
+    data = (await response.json()) as WikipediaPagesResponse;
+  } catch {
+    return null;
   }
 
-  const data = (await response.json()) as WikipediaPagesResponse;
-  const page = Object.values(data.query?.pages ?? {}).find((candidate) => !candidate.missing);
+  const aliasMap = new Map<string, string>();
 
-  return {
-    requestedTitle,
-    page
-  };
+  data.query?.normalized?.forEach((entry) => aliasMap.set(entry.from, entry.to));
+  data.query?.redirects?.forEach((entry) => aliasMap.set(entry.from, entry.to));
+
+  Object.values(data.query?.pages ?? {}).forEach((page) => {
+    if (page.missing) {
+      return;
+    }
+
+    const requestedTitle = typeof page.index === "number" ? requestedTitles[page.index - 1] : undefined;
+    const aliasTitles = [
+      requestedTitle,
+      page.title,
+      ...[...aliasMap.entries()].flatMap(([from, to]) => (to === page.title ? [from, to] : []))
+    ].filter((title): title is string => Boolean(title));
+
+    aliasTitles.forEach((title) => pageMap.set(title, page));
+  });
+
+  return pageMap;
 }
 
 async function hydrateWikipediaProse(spots: Spot[]): Promise<Spot[]> {
@@ -706,7 +839,7 @@ async function hydrateWikipediaProse(spots: Spot[]): Promise<Spot[]> {
         .map((source) => extractWikipediaTitle(source.url))
         .filter((title): title is string => Boolean(title));
     })
-  );
+  ).slice(0, WIKIPEDIA_MAX_HYDRATION_TITLES);
 
   if (titles.length === 0) {
     return spots;

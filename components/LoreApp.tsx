@@ -1,22 +1,32 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { SignInButton, SignOutButton, useUser } from "@clerk/nextjs";
+import PersonalAccessGate from "@/components/PersonalAccessGate";
 import SaveSpotButton from "@/components/SaveSpotButton";
 import {
   BookOpenText,
+  Check,
   Clock3,
   ExternalLink,
-  Landmark,
+  Flame,
+  LogIn,
+  LogOut,
+  Box,
+  Map as MapIcon,
   MapPin,
   LocateFixed,
   Navigation,
+  Pencil,
+  Plus,
   Radio,
   RefreshCw,
   Search,
   Sparkles,
+  Trash2,
   X
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type SyntheticEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cacheCellKey,
   DEFAULT_RADIUS_METERS,
@@ -32,7 +42,21 @@ import {
   Spot,
   themeLabel
 } from "@/lib/spots";
-import { getSavedSpots, saveSpot, SAVED_SPOTS_STORAGE_KEY, setSavedSpots, unsaveSpot } from "@/lib/saved-spots";
+import {
+  bootstrapUserData,
+  deleteUserPlace,
+  getRecentPlanningLocations,
+  getSavedSpots,
+  getUserPlaces,
+  getUserDataStorageKey,
+  rememberPlanningLocation as recordRecentPlanningLocation,
+  saveSpot,
+  setSavedSpots,
+  setUserDataOwner,
+  setUserPreferences,
+  unsaveSpot,
+  upsertUserPlace
+} from "@/lib/user-data";
 
 const LoreMap = dynamic(() => import("@/components/LoreMap"), {
   ssr: false,
@@ -41,9 +65,21 @@ const LoreMap = dynamic(() => import("@/components/LoreMap"), {
 
 type LoadState = "idle" | "loading" | "success" | "error";
 type AppMode = "travel" | "discover";
+type MapVariant = "standard" | "three-d";
+type AuthStatus = "loading" | "guest" | "signed-in";
+type PendingPersonalAction =
+  | { type: "auth-only" }
+  | { type: "save"; spot: Spot; shouldSave: boolean };
+type PlaceDraft = {
+  id: string | null;
+  title: string;
+  introduction: string;
+  theme: Spot["theme"];
+  lat: number;
+  lng: number;
+};
 
-const RECENT_PLACES_STORAGE_KEY = "lore:recent-planning-locations";
-const MAX_RECENT_PLACES = 5;
+const DEFAULT_PLACE_THEME: Spot["theme"] = "places";
 
 export default function LoreApp() {
   const [activeLocation, setActiveLocation] = useState<LocationPoint>(HYDE_PARK_LOCATION);
@@ -59,63 +95,129 @@ export default function LoreApp() {
   const [planningResults, setPlanningResults] = useState<PlanningLocation[]>([]);
   const [searchState, setSearchState] = useState<LoadState>("idle");
   const [savedSpots, setSavedSpotsState] = useState<Spot[]>([]);
+  const [userPlaces, setUserPlaces] = useState<Spot[]>([]);
   const [recentLocations, setRecentLocations] = useState<PlanningLocation[]>([]);
   const [savedDrawerOpen, setSavedDrawerOpen] = useState(false);
   const [detailExpanded, setDetailExpanded] = useState(false);
+  const [placeEditorOpen, setPlaceEditorOpen] = useState(false);
+  const [placeDraft, setPlaceDraft] = useState<PlaceDraft | null>(null);
   const [pinnedLocation, setPinnedLocation] = useState<LocationPoint | null>(null);
+  const [authGateOpen, setAuthGateOpen] = useState(false);
+  const [authNote, setAuthNote] = useState<string | null>(null);
+  const [pendingPersonalAction, setPendingPersonalAction] = useState<PendingPersonalAction | null>(null);
+  const [mapVariant, setMapVariant] = useState<MapVariant>("standard");
+  const { isLoaded, isSignedIn, user } = useUser();
 
   const cacheRef = useRef(new Map<string, Spot[]>());
   const watchIdRef = useRef<number | null>(null);
   const lastFetchLocationRef = useRef<LocationPoint | null>(null);
 
   const selectedSpot = useMemo(
-    () => spots.find((spot) => spot.id === selectedSpotId) ?? savedSpots.find((spot) => spot.id === selectedSpotId) ?? null,
-    [savedSpots, selectedSpotId, spots]
+    () =>
+      spots.find((spot) => spot.id === selectedSpotId) ??
+      userPlaces.find((spot) => spot.id === selectedSpotId) ??
+      savedSpots.find((spot) => spot.id === selectedSpotId) ??
+      null,
+    [savedSpots, selectedSpotId, spots, userPlaces]
   );
 
   const savedSpotIds = useMemo(() => new Set(savedSpots.map((spot) => spot.id)), [savedSpots]);
+  const selectedSpotIsUserPlace = selectedSpot?.sourceName === "User note";
   const selectedSpotDistance = useMemo(
     () => (selectedSpot ? distanceMeters(activeLocation, selectedSpot) : undefined),
     [activeLocation, selectedSpot]
   );
   const selectedSpotSources = selectedSpot?.sources ?? [];
-  const selectedSpotIntro = selectedSpot ? selectedSpot.narrative.slice(0, 5).join(" ") : "";
-  const selectedSpotMoreNarrative = selectedSpot ? selectedSpot.narrative.slice(5) : [];
+  const selectedSpotIntro = selectedSpot ? selectedSpot.teaser || selectedSpot.narrative.slice(0, 2).join(" ") : "";
+  const selectedSpotMoreNarrative = selectedSpot
+    ? selectedSpot.narrative
+        .filter((line) => line && line !== selectedSpotIntro && !selectedSpotIntro.includes(line))
+        .slice(0, 10)
+    : [];
   const hasMoreDetail = Boolean(
-    selectedSpot && (selectedSpot.narrative.length > 1 || selectedSpot.facts.length > 0 || selectedSpot.whyThisMatters)
+    selectedSpot && (selectedSpotMoreNarrative.length > 0 || selectedSpot.facts.length > 2 || selectedSpot.whyThisMatters)
   );
   const travelLocation = userLocation ?? HYDE_PARK_LOCATION;
   const savedSpotCount = savedSpots.length;
   const mapUserLocation = mode === "discover" ? pinnedLocation : userLocation;
+  const heroTitle =
+    mode === "discover"
+      ? "Search"
+      : walkMode
+        ? "Live"
+        : "Nearby";
+  const heroKicker = mode === "discover" ? "Discover" : walkMode ? "Travel" : "Travel";
+  const authStatus: AuthStatus = !isLoaded ? "loading" : isSignedIn ? "signed-in" : "guest";
+  const authUserLabel = user?.fullName ?? user?.primaryEmailAddress?.emailAddress ?? "Account";
+  const draftPlaceSpot = useMemo<Spot | null>(() => {
+    if (!placeEditorOpen || !placeDraft) {
+      return null;
+    }
+
+    const title = placeDraft.title.trim() || "Draft place";
+    const introduction = placeDraft.introduction.trim() || "Draft map note";
+
+    return {
+      id: placeDraft.id ?? "user-place:draft",
+      title,
+      lat: placeDraft.lat,
+      lng: placeDraft.lng,
+      distanceMeters: distanceMeters(activeLocation, placeDraft),
+      summary: introduction,
+      teaser: introduction,
+      narrative: [introduction],
+      facts: [`${placeDraft.lat.toFixed(5)}, ${placeDraft.lng.toFixed(5)}`],
+      sourceName: "User note",
+      sourceUrl: "",
+      sources: [
+        {
+          name: "User note",
+          url: "",
+          quality: 5
+        }
+      ],
+      sourceLabel: "User note",
+      matchCount: 1,
+      relevanceScore: 100,
+      theme: placeDraft.theme,
+      signals: ["Draft place"],
+      whyThisMatters: ""
+    };
+  }, [activeLocation, placeDraft, placeEditorOpen]);
 
   const selectSpot = useCallback((spot: Spot) => {
     setSelectedSpotId(spot.id);
   }, []);
 
-  const toggleSavedSpot = useCallback((spot: Spot, shouldSave: boolean) => {
-    const nextSavedSpots = shouldSave ? saveSpot(spot) : unsaveSpot(spot.id);
-
-    setSavedSpotsState(nextSavedSpots);
-    setMessage(shouldSave ? "Saved to your collection." : "Removed from saved spots.");
+  const requestPersonalAccess = useCallback((action: PendingPersonalAction, note?: string) => {
+    setPendingPersonalAction(action);
+    setAuthNote(note ?? null);
+    setAuthGateOpen(true);
   }, []);
 
-  const rememberPlanningLocation = useCallback(
-    (location: PlanningLocation) => {
-      const nextLocations = [
-        location,
-        ...recentLocations.filter((recentLocation) => recentLocation.id !== location.id)
-      ].slice(0, MAX_RECENT_PLACES);
-
-      setRecentLocations(nextLocations);
-
-      try {
-        window.localStorage.setItem(RECENT_PLACES_STORAGE_KEY, JSON.stringify(nextLocations));
-      } catch {
-        // Recent places are a convenience only; failing storage should not block search.
+  const toggleSavedSpot = useCallback(
+    async (spot: Spot, shouldSave: boolean) => {
+      if (authStatus !== "signed-in") {
+        requestPersonalAccess(
+          { type: "save", spot, shouldSave },
+          authStatus === "loading" ? "Loading your Clerk session." : "Sign in to save spots to your collection."
+        );
+        return;
       }
+
+      const nextSavedSpots = shouldSave ? await saveSpot(spot) : await unsaveSpot(spot.id);
+
+      setSavedSpotsState(nextSavedSpots);
+      setMessage(shouldSave ? "Saved to your collection." : "Removed from saved spots.");
     },
-    [recentLocations]
+    [authStatus, requestPersonalAccess]
   );
+
+  const rememberPlanningLocation = useCallback(async (location: PlanningLocation) => {
+    const nextLocations = await recordRecentPlanningLocation(location);
+
+    setRecentLocations(nextLocations);
+  }, []);
 
   const loadSpots = useCallback(
     async (location: LocationPoint, options?: { force?: boolean; reason?: "manual" | "walk" | "preset" | "planning" }) => {
@@ -123,6 +225,7 @@ export default function LoreApp() {
       const cached = cacheRef.current.get(key);
 
       setActiveLocation(location);
+      void setUserPreferences({ lastLocation: location });
 
       if (cached && !options?.force) {
         setSpots(cached);
@@ -174,54 +277,43 @@ export default function LoreApp() {
   );
 
   useEffect(() => {
-    void loadSpots(HYDE_PARK_LOCATION, { reason: "preset" });
-  }, [loadSpots]);
+    let cancelled = false;
+
+    const hydrate = async () => {
+      setUserDataOwner(isSignedIn ? user?.id ?? null : null);
+      const userData = await bootstrapUserData();
+
+      if (cancelled) {
+        return;
+      }
+
+      setMode(userData.preferences.defaultMode ?? "travel");
+      setActiveLocation(userData.preferences.lastLocation ?? HYDE_PARK_LOCATION);
+      setSavedSpotsState(userData.savedSpots);
+      setUserPlaces(userData.userPlaces);
+      setRecentLocations(userData.recentPlanningLocations);
+
+      void loadSpots(userData.preferences.lastLocation ?? HYDE_PARK_LOCATION, { reason: "preset" });
+    };
+
+    void hydrate();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isSignedIn, loadSpots, user?.id]);
 
   useEffect(() => {
-    setSavedSpotsState(getSavedSpots());
-
-    const syncSavedSpots = (event: StorageEvent) => {
-      if (event.key === SAVED_SPOTS_STORAGE_KEY) {
+    const syncUserData = (event: StorageEvent) => {
+      if (event.key === getUserDataStorageKey()) {
         setSavedSpotsState(getSavedSpots());
+        setUserPlaces(getUserPlaces());
+        setRecentLocations(getRecentPlanningLocations());
       }
     };
 
-    window.addEventListener("storage", syncSavedSpots);
-    return () => window.removeEventListener("storage", syncSavedSpots);
-  }, []);
-
-  useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(RECENT_PLACES_STORAGE_KEY);
-
-      if (!raw) {
-        return;
-      }
-
-      const parsed = JSON.parse(raw);
-
-      if (!Array.isArray(parsed)) {
-        return;
-      }
-
-      setRecentLocations(
-        parsed
-          .filter((location): location is PlanningLocation => {
-            return (
-              location &&
-              typeof location === "object" &&
-              typeof location.id === "string" &&
-              typeof location.label === "string" &&
-              typeof location.description === "string" &&
-              typeof location.lat === "number" &&
-              typeof location.lng === "number"
-            );
-          })
-          .slice(0, MAX_RECENT_PLACES)
-      );
-    } catch {
-      setRecentLocations([]);
-    }
+    window.addEventListener("storage", syncUserData);
+    return () => window.removeEventListener("storage", syncUserData);
   }, []);
 
   useEffect(() => {
@@ -238,7 +330,25 @@ export default function LoreApp() {
   }, [selectedSpotId]);
 
   useEffect(() => {
-    if (!selectedSpot || selectedSpot.sourceName === "Wikipedia") {
+    if (authStatus !== "signed-in" || !pendingPersonalAction) {
+      return;
+    }
+
+    const action = pendingPersonalAction;
+    setPendingPersonalAction(null);
+    setAuthGateOpen(false);
+    setAuthNote(null);
+
+    if (action.type === "save") {
+      void (action.shouldSave ? saveSpot(action.spot) : unsaveSpot(action.spot.id)).then((nextSavedSpots) => {
+        setSavedSpotsState(nextSavedSpots);
+        setMessage(action.shouldSave ? "Saved to your collection." : "Removed from saved spots.");
+      });
+    }
+  }, [authStatus, pendingPersonalAction]);
+
+  useEffect(() => {
+    if (!selectedSpot || selectedSpot.sourceName !== "Wikidata") {
       return;
     }
 
@@ -258,7 +368,9 @@ export default function LoreApp() {
             return currentSavedSpots;
           }
 
-          return setSavedSpots(currentSavedSpots.map((spot) => (spot.id === hydratedSpot.id ? hydratedSpot : spot)));
+          const nextSavedSpots = currentSavedSpots.map((spot) => (spot.id === hydratedSpot.id ? hydratedSpot : spot));
+          void setSavedSpots(nextSavedSpots);
+          return nextSavedSpots;
         });
       })
       .catch(() => {
@@ -297,6 +409,7 @@ export default function LoreApp() {
     (location: LocationPoint, options?: { message?: string }) => {
       stopWalkMode({ silent: true });
       setMode("discover");
+      void setUserPreferences({ defaultMode: "discover", lastLocation: location });
       setPinnedLocation(location);
       setUserLocation(null);
       setPlanningResults([]);
@@ -311,7 +424,7 @@ export default function LoreApp() {
   const selectPlanningLocation = useCallback(
     (location: PlanningLocation) => {
       setPlanningQuery(location.label);
-      rememberPlanningLocation(location);
+      void rememberPlanningLocation(location);
       pinExploreLocation(location, { message: `Exploring ${location.label}.` });
     },
     [pinExploreLocation, rememberPlanningLocation]
@@ -325,8 +438,11 @@ export default function LoreApp() {
 
       stopWalkMode({ silent: true });
       setMode(nextMode);
+      void setUserPreferences({ defaultMode: nextMode });
       setPinnedLocation(null);
       setUserLocation(null);
+      setPlaceEditorOpen(false);
+      setPlaceDraft(null);
 
       if (nextMode === "discover") {
         setMessage("Discover mode: search for a city or place.");
@@ -345,6 +461,7 @@ export default function LoreApp() {
     async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
       setMode("discover");
+      void setUserPreferences({ defaultMode: "discover" });
 
       const query = planningQuery.trim();
 
@@ -368,13 +485,13 @@ export default function LoreApp() {
           return;
         }
 
-        selectPlanningLocation(results[0]);
+        setMessage("Choose a place from the results.");
       } catch (error) {
         setSearchState("error");
         setMessage(error instanceof Error ? error.message : "Unable to search that place.");
       }
     },
-    [planningQuery, selectPlanningLocation]
+    [planningQuery]
   );
 
   const startWalkMode = useCallback(() => {
@@ -389,6 +506,7 @@ export default function LoreApp() {
     }
 
     setMode("travel");
+    void setUserPreferences({ defaultMode: "travel" });
     setPinnedLocation(null);
     setWalkMode(true);
     setMessage("Waiting for location permission.");
@@ -426,20 +544,18 @@ export default function LoreApp() {
     );
   }, [loadSpots, stopWalkMode]);
 
-  const resetToHydePark = useCallback(() => {
-    stopWalkMode({ silent: true });
-    setMode("travel");
-    setUserLocation(null);
-    setPinnedLocation(null);
-    setPlanningQuery("");
-    setPlanningResults([]);
-    setSearchState("idle");
-    void loadSpots(HYDE_PARK_LOCATION, { reason: "preset" });
-  }, [loadSpots, stopWalkMode]);
-
   const refresh = useCallback(() => {
     void loadSpots(activeLocation, { force: true, reason: "manual" });
   }, [activeLocation, loadSpots]);
+
+  const handleSavedDrawerToggle = useCallback(
+    (event: SyntheticEvent<HTMLDetailsElement>) => {
+      const nextOpen = event.currentTarget.open;
+
+      setSavedDrawerOpen(nextOpen);
+    },
+    []
+  );
 
   const pinCurrentView = useCallback(() => {
     if (mode !== "discover") {
@@ -460,13 +576,135 @@ export default function LoreApp() {
     [mode, pinExploreLocation]
   );
 
+  const openNewPlaceEditor = useCallback(() => {
+    const draftLocation = userLocation ?? activeLocation;
+
+    setPlaceDraft({
+      id: null,
+      title: "",
+      introduction: "",
+      theme: DEFAULT_PLACE_THEME,
+      lat: draftLocation.lat,
+      lng: draftLocation.lng
+    });
+    setPlaceEditorOpen(true);
+    setMessage("Click the map to move the place marker.");
+  }, [activeLocation, userLocation]);
+
+  const openEditPlaceEditor = useCallback((spot: Spot) => {
+    setPlaceDraft({
+      id: spot.id,
+      title: spot.title,
+      introduction: spot.teaser || spot.summary || spot.narrative[0] || "",
+      theme: spot.theme,
+      lat: spot.lat,
+      lng: spot.lng
+    });
+    setPlaceEditorOpen(true);
+    setMessage("Update the note or click the map to move it.");
+  }, []);
+
+  const closePlaceEditor = useCallback(() => {
+    setPlaceEditorOpen(false);
+    setPlaceDraft(null);
+  }, []);
+
+  const handleTravelMapClick = useCallback(
+    (location: LocationPoint) => {
+      if (mode !== "travel" || !placeEditorOpen) {
+        return;
+      }
+
+      setPlaceDraft((draft) =>
+        draft
+          ? {
+              ...draft,
+              lat: location.lat,
+              lng: location.lng
+            }
+          : draft
+      );
+      setMessage("Place marker moved.");
+    },
+    [mode, placeEditorOpen]
+  );
+
+  const saveUserPlace = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+
+      if (!placeDraft) {
+        return;
+      }
+
+      const title = placeDraft.title.trim();
+      const introduction = placeDraft.introduction.trim();
+
+      if (!title || !introduction) {
+        setMessage("Add a label and introduction for this place.");
+        return;
+      }
+
+      const id = placeDraft.id ?? `user-place:${Date.now()}`;
+      const nextPlace: Spot = {
+        id,
+        title,
+        lat: placeDraft.lat,
+        lng: placeDraft.lng,
+        distanceMeters: distanceMeters(activeLocation, placeDraft),
+        summary: introduction,
+        teaser: introduction,
+        narrative: [introduction],
+        facts: [`${placeDraft.lat.toFixed(5)}, ${placeDraft.lng.toFixed(5)}`],
+        sourceName: "User note",
+        sourceUrl: "",
+        sources: [
+          {
+            name: "User note",
+            url: "",
+            quality: 5
+          }
+        ],
+        sourceLabel: "User note",
+        matchCount: 1,
+        relevanceScore: 100,
+        theme: placeDraft.theme,
+        signals: ["User place"],
+        whyThisMatters: ""
+      };
+
+      const nextPlaces = await upsertUserPlace(nextPlace);
+
+      setUserPlaces(nextPlaces);
+      setSelectedSpotId(id);
+      closePlaceEditor();
+      setMessage(placeDraft.id ? "Place updated." : "Place added to your map.");
+    },
+    [activeLocation, closePlaceEditor, placeDraft]
+  );
+
+  const removeUserPlace = useCallback(
+    async (spot: Spot) => {
+      const nextPlaces = await deleteUserPlace(spot.id);
+
+      setUserPlaces(nextPlaces);
+      setSelectedSpotId(null);
+      closePlaceEditor();
+      setMessage("Place removed from your map.");
+    },
+    [closePlaceEditor]
+  );
+
   const mapSpots = useMemo(() => {
-    if (!selectedSpot || spots.some((spot) => spot.id === selectedSpot.id)) {
-      return spots;
+    const visibleUserPlaces = draftPlaceSpot ? userPlaces.filter((place) => place.id !== draftPlaceSpot.id) : userPlaces;
+    const nearbySpots = [...(draftPlaceSpot ? [draftPlaceSpot] : []), ...visibleUserPlaces, ...spots];
+
+    if (!selectedSpot || nearbySpots.some((spot) => spot.id === selectedSpot.id)) {
+      return nearbySpots;
     }
 
-    return [...spots, selectedSpot];
-  }, [selectedSpot, spots]);
+    return [...nearbySpots, selectedSpot];
+  }, [draftPlaceSpot, selectedSpot, spots, userPlaces]);
 
   const surpriseSpot = useMemo(() => {
     if (spots.length === 0) {
@@ -500,31 +738,58 @@ export default function LoreApp() {
           : updatedAt
             ? `Updated ${updatedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
           : "Travel mode";
-  const sectionNote =
-    mode === "discover"
-      ? "Search a city or click the map to drop a pin, then explore what is nearby."
-      : "Live location stays foreground-only while you walk.";
-  const sidebarPrompt = mode === "discover" ? "Plan ahead" : "Walk mode";
+  const authGateTitle = "Sign in with Clerk";
+  const authGateCopy =
+    authStatus === "loading"
+      ? "Loading your Clerk session."
+      : "Sign in to continue.";
 
   return (
     <main className="app-shell">
       <aside className="side-panel" aria-label="Lore controls">
         <header className="brand-row">
           <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-            <div className="brand-mark" aria-hidden="true">
-              <Landmark size={22} strokeWidth={2.4} />
-            </div>
             <div className="brand-copy">
               <h1 className="brand-title">Lore</h1>
-              <p className="brand-subtitle">Discover hidden history around normal places.</p>
             </div>
           </div>
 
-          <div className={`status-pill${walkMode ? " is-live" : ""}`}>
-            <span className="pulse" />
-            {statusText}
+          <div className="header-actions">
+            <div className={`status-pill${walkMode ? " is-live" : ""}`}>
+              <span className="pulse" />
+              {statusText}
+            </div>
+
+            {authStatus === "signed-in" ? (
+              <SignOutButton>
+                <button className="account-action" type="button" aria-label="Sign out" title={authUserLabel}>
+                  <LogOut size={18} />
+                </button>
+              </SignOutButton>
+            ) : (
+              <SignInButton mode="modal">
+                <button className="account-action" type="button" aria-label="Sign in" title="Sign in">
+                  <LogIn size={18} />
+                </button>
+              </SignInButton>
+            )}
           </div>
         </header>
+
+        <section className="hero-card">
+          <p className="hero-kicker">{heroKicker}</p>
+          <h2 className="hero-title">{heroTitle}</h2>
+          <div className="hero-stats" aria-label="Current context">
+            <div className="stat-card">
+              <span className="stat-label">Area</span>
+              <strong className="stat-value">{activeLocation.label}</strong>
+            </div>
+            <div className="stat-card">
+              <span className="stat-label">Saved</span>
+              <strong className="stat-value">{savedSpotCount}</strong>
+            </div>
+          </div>
+        </section>
 
         <div className="mode-switch" role="tablist" aria-label="Lore mode">
           <button
@@ -547,34 +812,10 @@ export default function LoreApp() {
           </button>
         </div>
 
-        <section className="control-summary" aria-label="Mode summary">
-          <p className="control-summary-kicker">{sidebarPrompt}</p>
-          <h2 className="control-summary-title">{activeLocation.label}</h2>
-          <p className="control-summary-copy">{sectionNote}</p>
-        </section>
-
-        <div className="quick-actions" aria-label="Quick actions">
-          {mode === "discover" ? (
-            <button className="action-button primary" type="button" onClick={pinCurrentView}>
-              <MapPin size={17} />
-              Pin here
-            </button>
-          ) : (
-            <button className={`action-button${walkMode ? " live" : ""}`} type="button" onClick={startWalkMode}>
-              {walkMode ? <Radio size={17} /> : <LocateFixed size={17} />}
-              {walkMode ? "Live" : "Near me"}
-            </button>
-          )}
-          <button className="action-button" type="button" onClick={handleSurprise} disabled={!surpriseSpot}>
-            <Sparkles size={17} />
-            Surprise me
-          </button>
-        </div>
-
         {mode === "discover" ? (
           <form className="planning-form" onSubmit={searchForPlanningLocation}>
             <label className="section-heading" htmlFor="planning-search">
-              Plan ahead
+              Place
             </label>
             <div className="planning-search">
               <Search size={16} aria-hidden="true" />
@@ -590,7 +831,7 @@ export default function LoreApp() {
                     setSearchState("idle");
                   }
                 }}
-                placeholder="Search city or landmark"
+                placeholder="City or landmark"
                 autoComplete="off"
               />
               <button className="planning-submit" type="submit" disabled={searchState === "loading"} aria-label="Search place">
@@ -635,35 +876,180 @@ export default function LoreApp() {
               </div>
             ) : null}
           </form>
-        ) : (
-          <section className="mode-callout" aria-label="Planning mode hint">
-            <p className="mode-callout-title">Discover owns planning.</p>
-            <p className="mode-callout-copy">Switch to Discover to search for a city or place before exploring it.</p>
-          </section>
-        )}
+        ) : null}
 
-        <details className="saved-drawer" open={savedDrawerOpen} onToggle={(event) => setSavedDrawerOpen(event.currentTarget.open)}>
-          <summary className="saved-drawer-summary">
-            <span>Saved spots</span>
-            <span className="saved-drawer-count">{savedSpotCount}</span>
-          </summary>
+        <div className="action-grid" aria-label="Quick actions">
+          {mode === "discover" ? (
+            <button className="action-button primary" type="button" onClick={pinCurrentView}>
+              <MapPin size={17} />
+              Pin here
+            </button>
+          ) : (
+            <button className={`action-button${walkMode ? " live" : ""}`} type="button" onClick={startWalkMode}>
+              {walkMode ? <Radio size={17} /> : <LocateFixed size={17} />}
+              {walkMode ? "Pause live" : "Use my location"}
+            </button>
+          )}
+          {mode === "travel" ? (
+            <button className="action-button primary" type="button" onClick={openNewPlaceEditor}>
+              <Plus size={17} />
+              Add place
+            </button>
+          ) : null}
+          <button className="action-button" type="button" onClick={handleSurprise} disabled={!surpriseSpot}>
+            <Sparkles size={17} />
+            Surprise me
+          </button>
+        </div>
 
-          {savedSpots.length > 0 ? (
-            <div className="saved-drawer-list">
-              {savedSpots.map((spot) => (
-                <article className={`saved-card${spot.id === selectedSpot?.id ? " is-selected" : ""}`} key={spot.id}>
-                  <button className="saved-card-main" type="button" onClick={() => selectSpot(spot)}>
-                    <h3 className="saved-title">{spot.title}</h3>
-                    <span className="saved-meta">{themeLabel(spot.theme)}</span>
+        {mode === "travel" && placeEditorOpen && placeDraft ? (
+          <form className="place-editor" onSubmit={saveUserPlace}>
+            <div className="section-title-row">
+              <label className="section-heading" htmlFor="place-label">
+                Place note
+              </label>
+              <button className="icon-button compact" type="button" onClick={closePlaceEditor} aria-label="Close place editor">
+                <X size={15} />
+              </button>
+            </div>
+            <input
+              id="place-label"
+              className="place-input"
+              value={placeDraft.title}
+              onChange={(event) => setPlaceDraft((draft) => (draft ? { ...draft, title: event.target.value } : draft))}
+              placeholder="Label this location"
+              maxLength={80}
+            />
+            <textarea
+              className="place-textarea"
+              value={placeDraft.introduction}
+              onChange={(event) => setPlaceDraft((draft) => (draft ? { ...draft, introduction: event.target.value } : draft))}
+              placeholder="Write a short introduction"
+              rows={4}
+              maxLength={420}
+            />
+            <select
+              className="place-select"
+              value={placeDraft.theme}
+              onChange={(event) => setPlaceDraft((draft) => (draft ? { ...draft, theme: event.target.value as Spot["theme"] } : draft))}
+              aria-label="Place theme"
+            >
+              <option value="places">Place</option>
+              <option value="landmarks">Landmark</option>
+              <option value="culture">Culture</option>
+              <option value="events">Event</option>
+              <option value="people">People</option>
+              <option value="institutions">Institution</option>
+              <option value="transport">Transport</option>
+            </select>
+            <p className="place-coordinates">
+              {placeDraft.lat.toFixed(5)}, {placeDraft.lng.toFixed(5)}
+            </p>
+            <button className="action-button primary" type="submit">
+              <Check size={17} />
+              {placeDraft.id ? "Update place" : "Save place"}
+            </button>
+          </form>
+        ) : null}
+
+        {mode === "travel" && userPlaces.length > 0 ? (
+          <section className="user-place-section" aria-label="Your places">
+            <div className="section-title-row">
+              <span className="section-heading">Your places</span>
+              <span className="saved-count">{userPlaces.length}</span>
+            </div>
+            <div className="user-place-list">
+              {userPlaces.slice(0, 4).map((place) => (
+                <article className={`saved-card${place.id === selectedSpot?.id ? " is-selected" : ""}`} key={place.id}>
+                  <button className="saved-card-main" type="button" onClick={() => selectSpot(place)}>
+                    <h3 className="saved-title">{place.title}</h3>
+                    <span className="saved-meta">{themeLabel(place.theme)}</span>
                   </button>
-                  <SaveSpotButton spot={spot} saved={savedSpotIds.has(spot.id)} onToggle={toggleSavedSpot} />
+                  <button className="icon-button compact" type="button" onClick={() => openEditPlaceEditor(place)} aria-label={`Edit ${place.title}`}>
+                    <Pencil size={15} />
+                  </button>
                 </article>
               ))}
             </div>
+          </section>
+        ) : null}
+
+        <details className="saved-drawer" open={savedDrawerOpen} onToggle={handleSavedDrawerToggle}>
+          <summary className="saved-drawer-summary">
+            <div>
+              <span className="mini-heading">Saved spots</span>
+            </div>
+            <span className="saved-drawer-count">{savedSpotCount}</span>
+          </summary>
+
+          {authStatus === "signed-in" ? (
+            savedSpots.length > 0 ? (
+              <div className="saved-drawer-list">
+                {savedSpots.map((spot) => (
+                  <article className={`saved-card${spot.id === selectedSpot?.id ? " is-selected" : ""}`} key={spot.id}>
+                    <button className="saved-card-main" type="button" onClick={() => selectSpot(spot)}>
+                      <h3 className="saved-title">{spot.title}</h3>
+                      <span className="saved-meta">{themeLabel(spot.theme)}</span>
+                    </button>
+                    <SaveSpotButton spot={spot} saved={savedSpotIds.has(spot.id)} onToggle={toggleSavedSpot} />
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state">No saved spots.</div>
+            )
           ) : (
-            <div className="empty-state">Save spots from the detail panel to keep them here.</div>
+            <div className="empty-state empty-state-auth">
+              <p>Sign in to continue.</p>
+              <button
+                className="action-button primary"
+                type="button"
+                onClick={() =>
+                  requestPersonalAccess(
+                    { type: "auth-only" },
+                    "Sign in to continue."
+                  )
+                }
+              >
+                Sign in
+              </button>
+            </div>
           )}
         </details>
+
+        <section className="spot-section" aria-label="Nearby stories">
+          <div className="section-title-row">
+            <span className="section-heading">Signal Stack</span>
+            <span className="saved-count">{spots.length}</span>
+          </div>
+          <p className="section-note">
+            {loadState === "loading"
+              ? "Scanning the map for public records."
+              : spots.length > 0
+                ? "Tap a record to pull it into focus."
+                : "No nearby records loaded yet."}
+          </p>
+          <div className="spot-list">
+            {spots.slice(0, 6).map((spot, index) => (
+              <article className={`spot-card${spot.id === selectedSpot?.id ? " is-selected" : ""}`} key={spot.id}>
+                <button className="spot-card-main" type="button" onClick={() => selectSpot(spot)}>
+                  <div className="spot-copy">
+                    <div className="spot-headline">
+                      <span className="spot-index">{String(index + 1).padStart(2, "0")}</span>
+                      <h3 className="spot-title">{spot.title}</h3>
+                    </div>
+                    <div className="spot-meta">
+                      <span>{themeLabel(spot.theme)}</span>
+                      <span>{formatDistance(distanceMeters(activeLocation, spot))}</span>
+                    </div>
+                    <p className="spot-summary">{spot.teaser || spot.narrative[0] || "Open the record for sourced context."}</p>
+                  </div>
+                  {spot.imageUrl ? <img className="spot-image" src={spot.imageUrl} alt="" /> : <Flame className="spot-glyph" size={24} />}
+                </button>
+              </article>
+            ))}
+          </div>
+        </section>
       </aside>
 
       <section className="map-region" aria-label="Map">
@@ -673,11 +1059,32 @@ export default function LoreApp() {
           selectedSpotId={selectedSpot?.id ?? null}
           onSelectSpot={selectSpot}
           userLocation={mapUserLocation}
-          onMapClick={mode === "discover" ? handleDiscoverMapClick : undefined}
+          onMapClick={mode === "discover" ? handleDiscoverMapClick : mode === "travel" && placeEditorOpen ? handleTravelMapClick : undefined}
+          variant={mapVariant}
         />
         <div className="map-vignette" />
 
         <div className="map-toolbar">
+          <div className="map-variant-switch" role="group" aria-label="Map style">
+            <button
+              className={`icon-button map-variant-button${mapVariant === "standard" ? " is-active" : ""}`}
+              type="button"
+              onClick={() => setMapVariant("standard")}
+              aria-label="Use standard map"
+              title="Standard map"
+            >
+              <MapIcon size={18} />
+            </button>
+            <button
+              className={`icon-button map-variant-button${mapVariant === "three-d" ? " is-active" : ""}`}
+              type="button"
+              onClick={() => setMapVariant("three-d")}
+              aria-label="Use 3D map"
+              title="3D map"
+            >
+              <Box size={18} />
+            </button>
+          </div>
           <button className="icon-button" type="button" onClick={handleSurprise} disabled={!surpriseSpot} aria-label="Surprise me">
             <Sparkles size={18} />
           </button>
@@ -708,21 +1115,27 @@ export default function LoreApp() {
             {selectedSpot.imageUrl ? <img className="detail-media" src={selectedSpot.imageUrl} alt="" /> : null}
             <div className="detail-kicker-row">
               <span className="detail-theme">{themeLabel(selectedSpot.theme)}</span>
+              <span className="detail-distance">{formatDistance(selectedSpotDistance)}</span>
+              <span className="source-count">
+                {selectedSpot.sourceName}
+              </span>
             </div>
             <h2 className="detail-title">{selectedSpot.title}</h2>
-            <div className="spot-meta">
-              <span>
-                {formatDistance(selectedSpotDistance)} from {activeLocation.label}
-              </span>
+            <div className="detail-meta">
+              <span>{formatDistance(selectedSpotDistance)} from {activeLocation.label}</span>
               <span className="spot-source">
                 <BookOpenText size={13} />
-                {selectedSpot.sourceName === "Wikipedia" ? "Wikipedia article" : "Wikidata record"}
+                {selectedSpot.sourceName === "User note"
+                  ? "Personal map note"
+                  : selectedSpot.sourceName === "Wikipedia"
+                    ? "Wikipedia article"
+                    : "Wikidata record"}
               </span>
             </div>
             {selectedSpotIntro ? <p className="detail-summary">{selectedSpotIntro}</p> : null}
             {selectedSpot.facts.length > 0 ? (
               <div className="detail-fact-list" aria-label="Spot facts">
-                {selectedSpot.facts.slice(0, 2).map((fact) => (
+                {selectedSpot.facts.slice(0, 3).map((fact) => (
                   <span className="detail-fact" key={fact}>
                     {fact}
                   </span>
@@ -733,10 +1146,12 @@ export default function LoreApp() {
               <button
                 className="learn-more-button"
                 type="button"
-                onClick={() => setDetailExpanded((current) => !current)}
+                onClick={() => {
+                  setDetailExpanded((expanded) => !expanded);
+                }}
                 aria-expanded={detailExpanded}
               >
-                {detailExpanded ? "Show less" : "Show more"}
+                {detailExpanded ? "Show less" : "Read more"}
               </button>
             ) : null}
             {detailExpanded && hasMoreDetail ? (
@@ -758,17 +1173,31 @@ export default function LoreApp() {
                 {selectedSpot.whyThisMatters ? <p className="detail-context">Context: {selectedSpot.whyThisMatters}</p> : null}
               </div>
             ) : null}
-            {!detailExpanded ? <p className="detail-note">Click Show more for the longer article excerpt and more facts.</p> : null}
             <div className="detail-actions">
               <div className="detail-primary-actions">
-                <SaveSpotButton spot={selectedSpot} saved={savedSpotIds.has(selectedSpot.id)} onToggle={toggleSavedSpot} showLabel />
-                <a className="source-link" href={selectedSpot.sourceUrl} target="_blank" rel="noreferrer">
-                  Open source
-                  <ExternalLink size={15} />
-                </a>
+                {selectedSpotIsUserPlace ? (
+                  <>
+                    <button className="source-link" type="button" onClick={() => openEditPlaceEditor(selectedSpot)}>
+                      Edit place
+                      <Pencil size={15} />
+                    </button>
+                    <button className="source-link danger" type="button" onClick={() => void removeUserPlace(selectedSpot)}>
+                      Remove
+                      <Trash2 size={15} />
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <SaveSpotButton spot={selectedSpot} saved={savedSpotIds.has(selectedSpot.id)} onToggle={toggleSavedSpot} showLabel />
+                    <a className="source-link" href={selectedSpot.sourceUrl} target="_blank" rel="noreferrer">
+                      Read source
+                      <ExternalLink size={15} />
+                    </a>
+                  </>
+                )}
               </div>
             </div>
-            {selectedSpotSources.length > 1 ? (
+            {!selectedSpotIsUserPlace && selectedSpotSources.length > 1 ? (
               <div className="detail-source-note" aria-label="Sources">
                 <span className="detail-source-label">Sources:</span>
                 <div className="detail-source-list">
@@ -784,6 +1213,17 @@ export default function LoreApp() {
         ) : null}
 
         {message ? <div className="toast">{message}</div> : null}
+        <PersonalAccessGate
+          open={authGateOpen}
+          title={authGateTitle}
+          copy={authGateCopy}
+          onClose={() => {
+            setAuthGateOpen(false);
+            setPendingPersonalAction(null);
+            setAuthNote(null);
+          }}
+          statusNote={authNote ?? null}
+        />
       </section>
     </main>
   );

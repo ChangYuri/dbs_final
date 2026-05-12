@@ -1,10 +1,12 @@
 import type { Metadata, Viewport } from "next";
+import { ClerkProvider } from "@clerk/nextjs";
 import "leaflet/dist/leaflet.css";
+import "maplibre-gl/dist/maplibre-gl.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Lore",
-  description: "Discover hidden history around you with sourced nearby stories, map markers, and planning search.",
+  description: "A field atlas for nearby public history.",
   manifest: "/manifest.webmanifest",
   icons: {
     icon: "/icon.svg",
@@ -13,7 +15,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#f6f0e6",
+  themeColor: "#20160d",
   width: "device-width",
   initialScale: 1,
   maximumScale: 1
@@ -25,8 +27,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body>{children}</body>
-    </html>
+    <ClerkProvider>
+      <html lang="en">
+        <body>{children}</body>
+      </html>
+    </ClerkProvider>
   );
 }
