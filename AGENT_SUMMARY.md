@@ -52,7 +52,7 @@ Improve planning mode and add more data sources, especially Wikidata.
 
 ### Version 3
 
-Add persistence and sync with Supabase and auth if needed.
+Add Supabase-backed persistence, gated auth for saving and deeper reads, and a major frontend UI/UX polish pass.
 
 ### Version 4
 
