@@ -22,6 +22,7 @@ import {
   Radio,
   RefreshCw,
   Search,
+  Share2,
   Sparkles,
   Trash2,
   X
@@ -81,6 +82,30 @@ type PlaceDraft = {
 
 const DEFAULT_PLACE_THEME: Spot["theme"] = "places";
 
+function readSharedSpotParams() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const spotId = params.get("spot")?.trim();
+  const lat = Number.parseFloat(params.get("lat") ?? "");
+  const lng = Number.parseFloat(params.get("lng") ?? "");
+
+  if (!spotId || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+
+  return {
+    spotId,
+    location: {
+      lat,
+      lng,
+      label: params.get("label")?.trim() || "Shared spot"
+    }
+  };
+}
+
 export default function LoreApp() {
   const [activeLocation, setActiveLocation] = useState<LocationPoint>(HYDE_PARK_LOCATION);
   const [userLocation, setUserLocation] = useState<LocationPoint | null>(null);
@@ -102,15 +127,19 @@ export default function LoreApp() {
   const [placeEditorOpen, setPlaceEditorOpen] = useState(false);
   const [placeDraft, setPlaceDraft] = useState<PlaceDraft | null>(null);
   const [pinnedLocation, setPinnedLocation] = useState<LocationPoint | null>(null);
+  const [discoverMapCenter, setDiscoverMapCenter] = useState<LocationPoint>(HYDE_PARK_LOCATION);
   const [authGateOpen, setAuthGateOpen] = useState(false);
   const [authNote, setAuthNote] = useState<string | null>(null);
   const [pendingPersonalAction, setPendingPersonalAction] = useState<PendingPersonalAction | null>(null);
   const [mapVariant, setMapVariant] = useState<MapVariant>("standard");
   const { isLoaded, isSignedIn, user } = useUser();
+  const [pendingSharedSpotId, setPendingSharedSpotId] = useState<string | null>(null);
 
   const cacheRef = useRef(new Map<string, Spot[]>());
   const watchIdRef = useRef<number | null>(null);
   const lastFetchLocationRef = useRef<LocationPoint | null>(null);
+  const initialSharedSpotRef = useRef<ReturnType<typeof readSharedSpotParams>>(null);
+  const discoverMapCenterRef = useRef<LocationPoint>(HYDE_PARK_LOCATION);
 
   const selectedSpot = useMemo(
     () =>
@@ -139,7 +168,7 @@ export default function LoreApp() {
   );
   const travelLocation = userLocation ?? HYDE_PARK_LOCATION;
   const savedSpotCount = savedSpots.length;
-  const mapUserLocation = mode === "discover" ? pinnedLocation : userLocation;
+  const mapUserLocation = mode === "discover" ? null : userLocation;
   const heroTitle =
     mode === "discover"
       ? "Search"
@@ -280,6 +309,9 @@ export default function LoreApp() {
     let cancelled = false;
 
     const hydrate = async () => {
+      const sharedSpot = initialSharedSpotRef.current ?? readSharedSpotParams();
+      initialSharedSpotRef.current = sharedSpot;
+
       setUserDataOwner(isSignedIn ? user?.id ?? null : null);
       const userData = await bootstrapUserData();
 
@@ -287,13 +319,20 @@ export default function LoreApp() {
         return;
       }
 
-      setMode(userData.preferences.defaultMode ?? "travel");
-      setActiveLocation(userData.preferences.lastLocation ?? HYDE_PARK_LOCATION);
+      const initialMode = sharedSpot ? "discover" : userData.preferences.defaultMode ?? "travel";
+      const initialLocation = sharedSpot?.location ?? userData.preferences.lastLocation ?? HYDE_PARK_LOCATION;
+
+      setMode(initialMode);
+      setActiveLocation(initialLocation);
+      setDiscoverMapCenter(initialLocation);
+      discoverMapCenterRef.current = initialLocation;
+      setPinnedLocation(sharedSpot?.location ?? null);
+      setPendingSharedSpotId(sharedSpot?.spotId ?? null);
       setSavedSpotsState(userData.savedSpots);
       setUserPlaces(userData.userPlaces);
       setRecentLocations(userData.recentPlanningLocations);
 
-      void loadSpots(userData.preferences.lastLocation ?? HYDE_PARK_LOCATION, { reason: "preset" });
+      void loadSpots(initialLocation, { reason: sharedSpot ? "planning" : "preset" });
     };
 
     void hydrate();
@@ -328,6 +367,28 @@ export default function LoreApp() {
   useEffect(() => {
     setDetailExpanded(false);
   }, [selectedSpotId]);
+
+  useEffect(() => {
+    if (!pendingSharedSpotId) {
+      return;
+    }
+
+    const sharedSpot =
+      spots.find((spot) => spot.id === pendingSharedSpotId) ??
+      userPlaces.find((spot) => spot.id === pendingSharedSpotId) ??
+      savedSpots.find((spot) => spot.id === pendingSharedSpotId);
+
+    if (sharedSpot) {
+      setSelectedSpotId(sharedSpot.id);
+      setPendingSharedSpotId(null);
+      return;
+    }
+
+    if (loadState === "success" || loadState === "error") {
+      setPendingSharedSpotId(null);
+      setMessage("That shared spot is not available in this map view.");
+    }
+  }, [loadState, pendingSharedSpotId, savedSpots, spots, userPlaces]);
 
   useEffect(() => {
     if (authStatus !== "signed-in" || !pendingPersonalAction) {
@@ -411,6 +472,8 @@ export default function LoreApp() {
       setMode("discover");
       void setUserPreferences({ defaultMode: "discover", lastLocation: location });
       setPinnedLocation(location);
+      setDiscoverMapCenter(location);
+      discoverMapCenterRef.current = location;
       setUserLocation(null);
       setPlanningResults([]);
       setSearchState("idle");
@@ -445,6 +508,8 @@ export default function LoreApp() {
       setPlaceDraft(null);
 
       if (nextMode === "discover") {
+        setDiscoverMapCenter(activeLocation);
+        discoverMapCenterRef.current = activeLocation;
         setMessage("Discover mode: search for a city or place.");
         return;
       }
@@ -562,8 +627,13 @@ export default function LoreApp() {
       return;
     }
 
-    pinExploreLocation(activeLocation, { message: `Pinned ${activeLocation.label}.` });
-  }, [activeLocation, mode, pinExploreLocation]);
+    pinExploreLocation(discoverMapCenterRef.current, { message: "Loading stories around this pin." });
+  }, [mode, pinExploreLocation]);
+
+  const handleDiscoverCenterChange = useCallback((location: LocationPoint) => {
+    setDiscoverMapCenter(location);
+    discoverMapCenterRef.current = location;
+  }, []);
 
   const handleDiscoverMapClick = useCallback(
     (location: LocationPoint) => {
@@ -571,9 +641,14 @@ export default function LoreApp() {
         return;
       }
 
-      pinExploreLocation(location);
+      setActiveLocation(location);
+      setDiscoverMapCenter(location);
+      discoverMapCenterRef.current = location;
+      setPinnedLocation(location);
+      setSelectedSpotId(null);
+      setMessage("Pin placed. Click Pin here to load nearby stories.");
     },
-    [mode, pinExploreLocation]
+    [mode]
   );
 
   const openNewPlaceEditor = useCallback(() => {
@@ -694,6 +769,39 @@ export default function LoreApp() {
     },
     [closePlaceEditor]
   );
+
+  const copySpotLink = useCallback(async () => {
+    if (!selectedSpot || typeof window === "undefined") {
+      return;
+    }
+
+    const url = new URL("/app", window.location.origin);
+
+    url.searchParams.set("spot", selectedSpot.id);
+    url.searchParams.set("lat", String(selectedSpot.lat));
+    url.searchParams.set("lng", String(selectedSpot.lng));
+    url.searchParams.set("label", selectedSpot.title);
+
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: selectedSpot.title,
+          text: selectedSpot.teaser || selectedSpot.summary || "Open this Lore spot.",
+          url: url.toString()
+        });
+        return;
+      }
+
+      await navigator.clipboard.writeText(url.toString());
+      setMessage("Spot link copied.");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+
+      setMessage("Unable to copy this link.");
+    }
+  }, [selectedSpot]);
 
   const mapSpots = useMemo(() => {
     const visibleUserPlaces = draftPlaceSpot ? userPlaces.filter((place) => place.id !== draftPlaceSpot.id) : userPlaces;
@@ -1059,7 +1167,9 @@ export default function LoreApp() {
           selectedSpotId={selectedSpot?.id ?? null}
           onSelectSpot={selectSpot}
           userLocation={mapUserLocation}
+          pinnedLocation={mode === "discover" ? pinnedLocation : null}
           onMapClick={mode === "discover" ? handleDiscoverMapClick : mode === "travel" && placeEditorOpen ? handleTravelMapClick : undefined}
+          onCenterChange={mode === "discover" ? handleDiscoverCenterChange : undefined}
           variant={mapVariant}
         />
         <div className="map-vignette" />
@@ -1097,6 +1207,12 @@ export default function LoreApp() {
               {walkMode ? <Radio size={18} /> : <Navigation size={18} />}
             </button>
           )}
+          {mode === "discover" && pinnedLocation ? (
+            <div className="map-pin-label" aria-live="polite" title={`Pinned at ${pinnedLocation.lat.toFixed(4)}, ${pinnedLocation.lng.toFixed(4)}`}>
+              <span className="map-pin-label-kicker">Pinned view</span>
+              <span className="map-pin-label-value">{pinnedLocation.label}</span>
+            </div>
+          ) : null}
           <button className="icon-button" type="button" onClick={refresh} disabled={loadState === "loading"} aria-label="Refresh stories">
             <RefreshCw size={18} />
           </button>
@@ -1175,6 +1291,10 @@ export default function LoreApp() {
             ) : null}
             <div className="detail-actions">
               <div className="detail-primary-actions">
+                <button className="source-link secondary" type="button" onClick={() => void copySpotLink()}>
+                  Share
+                  <Share2 size={15} />
+                </button>
                 {selectedSpotIsUserPlace ? (
                   <>
                     <button className="source-link" type="button" onClick={() => openEditPlaceEditor(selectedSpot)}>

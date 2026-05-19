@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type L from "leaflet";
-import type { MapLayerMouseEvent, Map as MapLibreMap, Marker, StyleSpecification } from "maplibre-gl";
+import type { FillExtrusionLayerSpecification, MapLayerMouseEvent, Map as MapLibreMap, Marker, StyleSpecification } from "maplibre-gl";
 import type { LocationPoint, Spot } from "@/lib/spots";
 
 export type MapVariant = "standard" | "three-d";
@@ -13,15 +13,24 @@ type LoreMapProps = {
   selectedSpotId: string | null;
   onSelectSpot: (spot: Spot) => void;
   userLocation: LocationPoint | null;
+  pinnedLocation: LocationPoint | null;
   onMapClick?: (location: LocationPoint) => void;
+  onCenterChange?: (location: LocationPoint) => void;
   variant?: MapVariant;
 };
 
 type MapImplementationProps = Omit<LoreMapProps, "variant">;
 
 const STANDARD_ZOOM = 15;
-const THREE_D_ZOOM = 15.4;
+const THREE_D_ZOOM = 15.65;
 const THREE_D_SELECTED_ZOOM = 16.6;
+const THREE_D_PITCH = 70;
+const THREE_D_SELECTED_PITCH = 73;
+const THREE_D_BEARING = -32;
+const THREE_D_SELECTED_BEARING_SHIFT = -10;
+const THREE_D_BUILDING_SOURCE_ID = "openfreemap";
+const THREE_D_BUILDING_LAYER_ID = "3d-buildings";
+const THREE_D_BUILDING_SOURCE_URL = "https://tiles.openfreemap.org/planet";
 const THREE_D_STYLE: StyleSpecification = {
   version: 8,
   sources: {
@@ -51,12 +60,95 @@ const THREE_D_STYLE: StyleSpecification = {
       type: "raster",
       source: "carto",
       paint: {
-        "raster-opacity": 0.96,
-        "raster-resampling": "linear"
+        "raster-opacity": 0.98,
+        "raster-resampling": "linear",
+        "raster-saturation": -0.12,
+        "raster-contrast": 0.05
       }
     }
   ]
 };
+
+function findFirstLabelLayerId(map: MapLibreMap) {
+  const layers = map.getStyle().layers;
+
+  if (!layers) {
+    return undefined;
+  }
+
+  return layers.find((layer) => layer.type === "symbol" && "text-field" in (layer.layout ?? {}))?.id;
+}
+
+function ensureThreeDBuildingsLayer(map: MapLibreMap) {
+  if (!map.getSource(THREE_D_BUILDING_SOURCE_ID)) {
+    map.addSource(THREE_D_BUILDING_SOURCE_ID, {
+      type: "vector",
+      url: THREE_D_BUILDING_SOURCE_URL
+    });
+  }
+
+  if (map.getLayer(THREE_D_BUILDING_LAYER_ID)) {
+    return;
+  }
+
+  const labelLayerId = findFirstLabelLayerId(map);
+
+  const layer: FillExtrusionLayerSpecification = {
+    id: THREE_D_BUILDING_LAYER_ID,
+    type: "fill-extrusion",
+    source: THREE_D_BUILDING_SOURCE_ID,
+    "source-layer": "building",
+    minzoom: 15,
+    filter: ["!=", ["get", "hide_3d"], true],
+    paint: {
+      "fill-extrusion-color": [
+        "interpolate",
+        ["linear"],
+        ["get", "render_height"],
+        0,
+        "#cfc7b8",
+        80,
+        "#b39d73",
+        200,
+        "#8d6e63",
+        400,
+        "#5d4037"
+      ],
+      "fill-extrusion-height": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        15,
+        0,
+        16,
+        ["coalesce", ["get", "render_height"], ["get", "height"], 0]
+      ],
+      "fill-extrusion-base": [
+        "interpolate",
+        ["linear"],
+        ["zoom"],
+        15,
+        0,
+        16,
+        ["coalesce", ["get", "render_min_height"], ["get", "min_height"], 0]
+      ],
+      "fill-extrusion-opacity": 0.88,
+      "fill-extrusion-vertical-gradient": true
+    }
+  };
+
+  map.addLayer(layer, labelLayerId);
+}
+
+function supportsWebGL() {
+  try {
+    const canvas = document.createElement("canvas");
+
+    return Boolean(canvas.getContext("webgl2") || canvas.getContext("webgl"));
+  } catch {
+    return false;
+  }
+}
 
 function createStandardSpotIcon(leaflet: typeof L, spot: Spot, selected: boolean) {
   const themeClass = spot.theme ? ` theme-${spot.theme}` : "";
@@ -93,18 +185,30 @@ function createLocationMarkerElement() {
   return marker;
 }
 
+function createPinnedMarkerElement() {
+  const marker = document.createElement("span");
+  marker.className = "lore-pinned-marker";
+  marker.setAttribute("aria-hidden", "true");
+  marker.innerHTML = '<span class="lore-pinned-marker-tip"></span><span class="lore-pinned-marker-core"></span>';
+
+  return marker;
+}
+
 function StandardLoreMap({
   center,
   spots,
   selectedSpotId,
   onSelectSpot,
   userLocation,
-  onMapClick
+  pinnedLocation,
+  onMapClick,
+  onCenterChange
 }: MapImplementationProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markerLayerRef = useRef<L.LayerGroup | null>(null);
   const locationLayerRef = useRef<L.LayerGroup | null>(null);
+  const pinnedLayerRef = useRef<L.LayerGroup | null>(null);
   const hasInitializedRef = useRef(false);
   const [mapReady, setMapReady] = useState(false);
 
@@ -137,6 +241,7 @@ function StandardLoreMap({
 
       markerLayerRef.current = leaflet.default.layerGroup().addTo(map);
       locationLayerRef.current = leaflet.default.layerGroup().addTo(map);
+      pinnedLayerRef.current = leaflet.default.layerGroup().addTo(map);
       mapRef.current = map;
       setMapReady(true);
 
@@ -150,9 +255,10 @@ function StandardLoreMap({
       mapRef.current = null;
       markerLayerRef.current = null;
       locationLayerRef.current = null;
+      pinnedLayerRef.current = null;
       hasInitializedRef.current = false;
     };
-  }, [center.lat, center.lng]);
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -187,7 +293,7 @@ function StandardLoreMap({
     }
 
     map.panTo([center.lat, center.lng], { animate: true, duration: 0.7 });
-  }, []);
+  }, [center.lat, center.lng]);
 
   useEffect(() => {
     const layer = markerLayerRef.current;
@@ -245,6 +351,37 @@ function StandardLoreMap({
   }, [mapReady, userLocation]);
 
   useEffect(() => {
+    const layer = pinnedLayerRef.current;
+
+    if (!mapReady || !layer) {
+      return;
+    }
+
+    layer.clearLayers();
+
+    if (!pinnedLocation) {
+      return;
+    }
+
+    void import("leaflet").then((leaflet) => {
+      leaflet.default.marker([pinnedLocation.lat, pinnedLocation.lng], {
+        icon: leaflet.default.divIcon({
+          html:
+            '<span class="lore-pinned-marker" aria-hidden="true">' +
+            '<span class="lore-pinned-marker-tip"></span>' +
+            '<span class="lore-pinned-marker-core"></span>' +
+            "</span>",
+          className: "lore-pinned-wrap",
+          iconSize: [28, 38],
+          iconAnchor: [14, 34]
+        }),
+        keyboard: false,
+        title: "Pinned location"
+      }).addTo(layer);
+    });
+  }, [mapReady, pinnedLocation]);
+
+  useEffect(() => {
     const map = mapRef.current;
     const selected = spots.find((spot) => spot.id === selectedSpotId);
 
@@ -254,6 +391,31 @@ function StandardLoreMap({
 
     map.panTo([selected.lat, selected.lng], { animate: true, duration: 0.45 });
   }, [selectedSpotId, spots]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+
+    if (!mapReady || !map || !onCenterChange) {
+      return;
+    }
+
+    const emitCenter = () => {
+      const nextCenter = map.getCenter();
+
+      onCenterChange({
+        lat: nextCenter.lat,
+        lng: nextCenter.lng,
+        label: "Pinned location"
+      });
+    };
+
+    map.on("moveend", emitCenter);
+    emitCenter();
+
+    return () => {
+      map.off("moveend", emitCenter);
+    };
+  }, [mapReady, onCenterChange]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -286,14 +448,18 @@ function ThreeDLoreMap({
   selectedSpotId,
   onSelectSpot,
   userLocation,
-  onMapClick
+  pinnedLocation,
+  onMapClick,
+  onCenterChange
 }: MapImplementationProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const spotMarkersRef = useRef<Marker[]>([]);
   const userMarkerRef = useRef<Marker | null>(null);
+  const pinnedMarkerRef = useRef<Marker | null>(null);
   const hasInitializedRef = useRef(false);
   const [mapReady, setMapReady] = useState(false);
+  const [mapFailed, setMapFailed] = useState(false);
 
   const selectedSpot = useMemo(
     () => spots.find((spot) => spot.id === selectedSpotId) ?? null,
@@ -301,7 +467,7 @@ function ThreeDLoreMap({
   );
 
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) {
+    if (mapFailed || !containerRef.current || mapRef.current) {
       return;
     }
 
@@ -312,17 +478,33 @@ function ThreeDLoreMap({
         return;
       }
 
-      const map = new maplibre.Map({
-        container: containerRef.current,
-        style: THREE_D_STYLE,
-        center: [center.lng, center.lat],
-        zoom: THREE_D_ZOOM,
-        pitch: 62,
-        bearing: -18,
-        attributionControl: {
-          compact: true
-        }
-      });
+      if (!supportsWebGL()) {
+        setMapFailed(true);
+        return;
+      }
+
+      let map: MapLibreMap;
+
+      try {
+        map = new maplibre.Map({
+          container: containerRef.current,
+          style: THREE_D_STYLE,
+          center: [center.lng, center.lat],
+          zoom: THREE_D_ZOOM,
+          pitch: THREE_D_PITCH,
+          bearing: THREE_D_BEARING,
+          maxPitch: 78,
+          canvasContextAttributes: {
+            antialias: true
+          },
+          attributionControl: {
+            compact: true
+          }
+        });
+      } catch {
+        setMapFailed(true);
+        return;
+      }
 
       map.addControl(
         new maplibre.NavigationControl({
@@ -336,6 +518,12 @@ function ThreeDLoreMap({
           return;
         }
 
+        try {
+          ensureThreeDBuildingsLayer(map);
+        } catch {
+          // Keep the pitched map usable even if the external building tiles fail.
+        }
+
         map.resize();
         setMapReady(true);
       });
@@ -343,6 +531,8 @@ function ThreeDLoreMap({
       mapRef.current = map;
 
       window.setTimeout(() => map.resize(), 0);
+    }).catch(() => {
+      setMapFailed(true);
     });
 
     return () => {
@@ -352,11 +542,13 @@ function ThreeDLoreMap({
       spotMarkersRef.current = [];
       userMarkerRef.current?.remove();
       userMarkerRef.current = null;
+      pinnedMarkerRef.current?.remove();
+      pinnedMarkerRef.current = null;
       mapRef.current?.remove();
       mapRef.current = null;
       hasInitializedRef.current = false;
     };
-  }, []);
+  }, [mapFailed]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -369,8 +561,8 @@ function ThreeDLoreMap({
       map.jumpTo({
         center: [center.lng, center.lat],
         zoom: THREE_D_ZOOM,
-        pitch: 62,
-        bearing: -18
+        pitch: THREE_D_PITCH,
+        bearing: THREE_D_BEARING
       });
       hasInitializedRef.current = true;
       return;
@@ -379,7 +571,7 @@ function ThreeDLoreMap({
     map.easeTo({
       center: [center.lng, center.lat],
       zoom: Math.max(map.getZoom(), THREE_D_ZOOM),
-      pitch: 62,
+      pitch: THREE_D_PITCH,
       bearing: map.getBearing(),
       duration: 800,
       essential: true
@@ -474,6 +666,36 @@ function ThreeDLoreMap({
   useEffect(() => {
     const map = mapRef.current;
 
+    if (!mapReady || !map) {
+      return;
+    }
+
+    pinnedMarkerRef.current?.remove();
+    pinnedMarkerRef.current = null;
+
+    if (!pinnedLocation) {
+      return;
+    }
+
+    void import("maplibre-gl").then((maplibre) => {
+      if (!mapRef.current) {
+        return;
+      }
+
+      pinnedMarkerRef.current = new maplibre.Marker({
+        element: createPinnedMarkerElement(),
+        anchor: "bottom",
+        pitchAlignment: "map",
+        rotationAlignment: "map"
+      })
+        .setLngLat([pinnedLocation.lng, pinnedLocation.lat])
+        .addTo(map);
+    });
+  }, [mapReady, pinnedLocation]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+
     if (!mapReady || !map || !selectedSpot) {
       return;
     }
@@ -481,13 +703,38 @@ function ThreeDLoreMap({
     map.flyTo({
       center: [selectedSpot.lng, selectedSpot.lat],
       zoom: Math.max(map.getZoom(), THREE_D_SELECTED_ZOOM),
-      pitch: 66,
-      bearing: map.getBearing() - 8,
+      pitch: THREE_D_SELECTED_PITCH,
+      bearing: map.getBearing() + THREE_D_SELECTED_BEARING_SHIFT,
       speed: 0.75,
       curve: 1.2,
       essential: true
     });
   }, [mapReady, selectedSpot]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+
+    if (!mapReady || !map || !onCenterChange) {
+      return;
+    }
+
+    const emitCenter = () => {
+      const nextCenter = map.getCenter();
+
+      onCenterChange({
+        lat: nextCenter.lat,
+        lng: nextCenter.lng,
+        label: "Pinned location"
+      });
+    };
+
+    map.on("moveend", emitCenter);
+    emitCenter();
+
+    return () => {
+      map.off("moveend", emitCenter);
+    };
+  }, [mapReady, onCenterChange]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -510,6 +757,21 @@ function ThreeDLoreMap({
       map.off("click", handleMapClick);
     };
   }, [mapReady, onMapClick]);
+
+  if (mapFailed) {
+    return (
+      <StandardLoreMap
+        center={center}
+        spots={spots}
+        selectedSpotId={selectedSpotId}
+        onSelectSpot={onSelectSpot}
+        userLocation={userLocation}
+        pinnedLocation={pinnedLocation}
+        onMapClick={onMapClick}
+        onCenterChange={onCenterChange}
+      />
+    );
+  }
 
   return <div ref={containerRef} className={`map-canvas three-d${onMapClick ? " is-pinnable" : ""}`} aria-label="Lore 3D map" />;
 }
