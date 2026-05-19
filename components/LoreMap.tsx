@@ -13,7 +13,9 @@ type LoreMapProps = {
   selectedSpotId: string | null;
   onSelectSpot: (spot: Spot) => void;
   userLocation: LocationPoint | null;
+  pinnedLocation: LocationPoint | null;
   onMapClick?: (location: LocationPoint) => void;
+  onCenterChange?: (location: LocationPoint) => void;
   variant?: MapVariant;
 };
 
@@ -93,18 +95,30 @@ function createLocationMarkerElement() {
   return marker;
 }
 
+function createPinnedMarkerElement() {
+  const marker = document.createElement("span");
+  marker.className = "lore-pinned-marker";
+  marker.setAttribute("aria-hidden", "true");
+  marker.innerHTML = '<span class="lore-pinned-marker-tip"></span><span class="lore-pinned-marker-core"></span>';
+
+  return marker;
+}
+
 function StandardLoreMap({
   center,
   spots,
   selectedSpotId,
   onSelectSpot,
   userLocation,
-  onMapClick
+  pinnedLocation,
+  onMapClick,
+  onCenterChange
 }: MapImplementationProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markerLayerRef = useRef<L.LayerGroup | null>(null);
   const locationLayerRef = useRef<L.LayerGroup | null>(null);
+  const pinnedLayerRef = useRef<L.LayerGroup | null>(null);
   const hasInitializedRef = useRef(false);
   const [mapReady, setMapReady] = useState(false);
 
@@ -137,6 +151,7 @@ function StandardLoreMap({
 
       markerLayerRef.current = leaflet.default.layerGroup().addTo(map);
       locationLayerRef.current = leaflet.default.layerGroup().addTo(map);
+      pinnedLayerRef.current = leaflet.default.layerGroup().addTo(map);
       mapRef.current = map;
       setMapReady(true);
 
@@ -150,9 +165,10 @@ function StandardLoreMap({
       mapRef.current = null;
       markerLayerRef.current = null;
       locationLayerRef.current = null;
+      pinnedLayerRef.current = null;
       hasInitializedRef.current = false;
     };
-  }, [center.lat, center.lng]);
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -187,7 +203,7 @@ function StandardLoreMap({
     }
 
     map.panTo([center.lat, center.lng], { animate: true, duration: 0.7 });
-  }, []);
+  }, [center.lat, center.lng]);
 
   useEffect(() => {
     const layer = markerLayerRef.current;
@@ -245,6 +261,37 @@ function StandardLoreMap({
   }, [mapReady, userLocation]);
 
   useEffect(() => {
+    const layer = pinnedLayerRef.current;
+
+    if (!mapReady || !layer) {
+      return;
+    }
+
+    layer.clearLayers();
+
+    if (!pinnedLocation) {
+      return;
+    }
+
+    void import("leaflet").then((leaflet) => {
+      leaflet.default.marker([pinnedLocation.lat, pinnedLocation.lng], {
+        icon: leaflet.default.divIcon({
+          html:
+            '<span class="lore-pinned-marker" aria-hidden="true">' +
+            '<span class="lore-pinned-marker-tip"></span>' +
+            '<span class="lore-pinned-marker-core"></span>' +
+            "</span>",
+          className: "lore-pinned-wrap",
+          iconSize: [28, 38],
+          iconAnchor: [14, 34]
+        }),
+        keyboard: false,
+        title: "Pinned location"
+      }).addTo(layer);
+    });
+  }, [mapReady, pinnedLocation]);
+
+  useEffect(() => {
     const map = mapRef.current;
     const selected = spots.find((spot) => spot.id === selectedSpotId);
 
@@ -254,6 +301,31 @@ function StandardLoreMap({
 
     map.panTo([selected.lat, selected.lng], { animate: true, duration: 0.45 });
   }, [selectedSpotId, spots]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+
+    if (!mapReady || !map || !onCenterChange) {
+      return;
+    }
+
+    const emitCenter = () => {
+      const nextCenter = map.getCenter();
+
+      onCenterChange({
+        lat: nextCenter.lat,
+        lng: nextCenter.lng,
+        label: "Pinned location"
+      });
+    };
+
+    map.on("moveend", emitCenter);
+    emitCenter();
+
+    return () => {
+      map.off("moveend", emitCenter);
+    };
+  }, [mapReady, onCenterChange]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -286,12 +358,15 @@ function ThreeDLoreMap({
   selectedSpotId,
   onSelectSpot,
   userLocation,
-  onMapClick
+  pinnedLocation,
+  onMapClick,
+  onCenterChange
 }: MapImplementationProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const spotMarkersRef = useRef<Marker[]>([]);
   const userMarkerRef = useRef<Marker | null>(null);
+  const pinnedMarkerRef = useRef<Marker | null>(null);
   const hasInitializedRef = useRef(false);
   const [mapReady, setMapReady] = useState(false);
 
@@ -352,6 +427,8 @@ function ThreeDLoreMap({
       spotMarkersRef.current = [];
       userMarkerRef.current?.remove();
       userMarkerRef.current = null;
+      pinnedMarkerRef.current?.remove();
+      pinnedMarkerRef.current = null;
       mapRef.current?.remove();
       mapRef.current = null;
       hasInitializedRef.current = false;
@@ -474,6 +551,36 @@ function ThreeDLoreMap({
   useEffect(() => {
     const map = mapRef.current;
 
+    if (!mapReady || !map) {
+      return;
+    }
+
+    pinnedMarkerRef.current?.remove();
+    pinnedMarkerRef.current = null;
+
+    if (!pinnedLocation) {
+      return;
+    }
+
+    void import("maplibre-gl").then((maplibre) => {
+      if (!mapRef.current) {
+        return;
+      }
+
+      pinnedMarkerRef.current = new maplibre.Marker({
+        element: createPinnedMarkerElement(),
+        anchor: "bottom",
+        pitchAlignment: "map",
+        rotationAlignment: "map"
+      })
+        .setLngLat([pinnedLocation.lng, pinnedLocation.lat])
+        .addTo(map);
+    });
+  }, [mapReady, pinnedLocation]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+
     if (!mapReady || !map || !selectedSpot) {
       return;
     }
@@ -488,6 +595,31 @@ function ThreeDLoreMap({
       essential: true
     });
   }, [mapReady, selectedSpot]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+
+    if (!mapReady || !map || !onCenterChange) {
+      return;
+    }
+
+    const emitCenter = () => {
+      const nextCenter = map.getCenter();
+
+      onCenterChange({
+        lat: nextCenter.lat,
+        lng: nextCenter.lng,
+        label: "Pinned location"
+      });
+    };
+
+    map.on("moveend", emitCenter);
+    emitCenter();
+
+    return () => {
+      map.off("moveend", emitCenter);
+    };
+  }, [mapReady, onCenterChange]);
 
   useEffect(() => {
     const map = mapRef.current;
